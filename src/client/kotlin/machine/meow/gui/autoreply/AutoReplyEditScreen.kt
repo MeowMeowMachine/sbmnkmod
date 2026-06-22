@@ -37,6 +37,10 @@ class AutoReplyEditScreen(
 
     private lateinit var activeToggleBtn: CustomButtonWidget
 
+    /** Verhindert, dass close() saveFields() nochmals aufruft, wenn ein Button-Handler
+     *  saveFields() bereits aufgerufen und danach rule.options modifiziert hat. */
+    private var suppressSaveOnClose = false
+
     // Label Y positions
     private var labelNameY    = 0
     private var labelTriggerY = 0
@@ -66,8 +70,8 @@ class AutoReplyEditScreen(
         // ── Name field ─────────────────────────────────────────────────────
         labelNameY = y - 9
         nameField = TextFieldWidget(textRenderer, fieldX, y, pw - 32, 20, Text.literal("Name"))
+        nameField.setMaxLength(64)  // vor .text setzen!
         nameField.text = rule.name
-        nameField.setMaxLength(64)
         // Kein setSuggestion – Placeholder wird manuell gerendert (kein Overflow)
         addDrawableChild(nameField)
         y += 28
@@ -75,8 +79,8 @@ class AutoReplyEditScreen(
         // ── Trigger field ───────────────────────────────────────────────────
         labelTriggerY = y - 9
         triggerField = TextFieldWidget(textRenderer, fieldX, y, pw - 32, 20, Text.literal("Trigger (regex)"))
+        triggerField.setMaxLength(128)  // vor .text setzen!
         triggerField.text = rule.triggerRegex
-        triggerField.setMaxLength(128)
         addDrawableChild(triggerField)
         y += 32
 
@@ -127,15 +131,15 @@ class AutoReplyEditScreen(
 
             // Text field – color managed per-frame in render() based on focus state
             val tf = TextFieldWidget(textRenderer, fieldX, rowY, textFW, 20, Text.literal("Reply text"))
+            tf.setMaxLength(256)  // MUSS vor tf.text gesetzt werden – Default ist 32!
             tf.text = option.text
-            tf.setMaxLength(256)
             addDrawableChild(tf)
             optionTextFields.add(tf)
 
             // Weight field – digits only, range [0, Int.MAX_VALUE]
             val wf = TextFieldWidget(textRenderer, xWeight, rowY, COL_WEIGHT_W, 20, Text.literal("Weight"))
+            wf.setMaxLength(10)   // MUSS vor wf.text gesetzt werden – Int.MAX_VALUE = 2147483647 → 10 digits
             wf.text = option.weight.coerceAtLeast(0).toString()
-            wf.setMaxLength(10)   // Int.MAX_VALUE = 2147483647 → 10 digits
             // Only allow digit characters; reject minus / letters / symbols
             wf.setTextPredicate { s ->
                 s.isEmpty() || (s.all { c -> c.isDigit() } &&
@@ -148,6 +152,7 @@ class AutoReplyEditScreen(
             val idx = i
             addDrawableChild(CustomButtonWidget.delete(xDel, rowY, COL_DEL_W, 20, "✕") {
                 saveFields(); rule.options.removeAt(idx); ModConfig.save()
+                suppressSaveOnClose = true
                 client?.setScreen(AutoReplyEditScreen(parent, rule))
             })
             y += 26
@@ -158,6 +163,7 @@ class AutoReplyEditScreen(
             saveFields()
             rule.options.add(ReplyOption("", 10))
             ModConfig.save()
+            suppressSaveOnClose = true
             client?.setScreen(AutoReplyEditScreen(parent, rule))
         })
 
@@ -184,7 +190,7 @@ class AutoReplyEditScreen(
      * §3 dark aqua  – text/command segments
      * §9 blue       – semicolons
      * §c light red  – delay numbers
-     * Colours are passed as 24-bit RGB to getTextConsumer which ignores alpha.
+     * §6 gold       – $ign placeholder
      */
     private fun drawSyntaxHighlight(context: DrawContext, text: String, x: Int, y: Int, maxX: Int) {
         val COL_STR = 0x00AAAA   // §3 dark aqua
@@ -193,7 +199,7 @@ class AutoReplyEditScreen(
         val y2 = y + 9
 
         if (!text.contains(';')) {
-            context.getTextConsumer().text(Text.literal(text).withColor(COL_STR), x, maxX, y, y2)
+            drawSegmentWithIgn(context, text, x, maxX, y, y2, COL_STR)
             return
         }
 
@@ -204,10 +210,14 @@ class AutoReplyEditScreen(
             val isNum = part.trim().removeSurrounding("\"").toLongOrNull() != null
             val pw = textRenderer.getWidth(part)
             if (pw > 0) {
-                context.getTextConsumer().text(
-                    Text.literal(part).withColor(if (isNum) COL_NUM else COL_STR),
-                    curX, minOf(curX + pw, maxX), y, y2
-                )
+                if (isNum) {
+                    context.getTextConsumer().text(
+                        Text.literal(part).withColor(COL_NUM),
+                        curX, minOf(curX + pw, maxX), y, y2
+                    )
+                } else {
+                    drawSegmentWithIgn(context, part, curX, minOf(curX + pw, maxX), y, y2, COL_STR)
+                }
                 curX += pw
             }
             if (i < parts.size - 1 && curX < maxX) {
@@ -218,6 +228,49 @@ class AutoReplyEditScreen(
                 )
                 curX += sw
             }
+        }
+    }
+
+    /** Draws a single text segment with $ign highlighted in gold (§6 = 0xFFAA00). */
+    private fun drawSegmentWithIgn(
+        context: DrawContext, text: String,
+        startX: Int, maxX: Int, y: Int, y2: Int, baseColor: Int
+    ) {
+        val IGN = "\$ign"
+        val COL_IGN = 0xFFAA00  // §6 gold
+        if (!text.contains(IGN, ignoreCase = true)) {
+            context.getTextConsumer().text(Text.literal(text).withColor(baseColor), startX, maxX, y, y2)
+            return
+        }
+        var curX = startX
+        var remaining = text
+        while (remaining.isNotEmpty() && curX < maxX) {
+            val idx = remaining.indexOf(IGN, ignoreCase = true)
+            if (idx < 0) {
+                val w = textRenderer.getWidth(remaining)
+                context.getTextConsumer().text(
+                    Text.literal(remaining).withColor(baseColor),
+                    curX, minOf(curX + w, maxX), y, y2
+                )
+                break
+            }
+            if (idx > 0) {
+                val before = remaining.substring(0, idx)
+                val w = textRenderer.getWidth(before)
+                context.getTextConsumer().text(
+                    Text.literal(before).withColor(baseColor),
+                    curX, minOf(curX + w, maxX), y, y2
+                )
+                curX += w
+            }
+            val token = remaining.substring(idx, idx + IGN.length)
+            val ignW = textRenderer.getWidth(token)
+            context.getTextConsumer().text(
+                Text.literal(token).withColor(COL_IGN),
+                curX, minOf(curX + ignW, maxX), y, y2
+            )
+            curX += ignW
+            remaining = remaining.substring(idx + IGN.length)
         }
     }
 
@@ -363,7 +416,9 @@ class AutoReplyEditScreen(
     override fun shouldPause() = false
 
     override fun close() {
-        saveFields(); ModConfig.save(); fadeNav { client?.setScreen(parent) }
+        if (!suppressSaveOnClose) { saveFields(); ModConfig.save() }
+        suppressSaveOnClose = false
+        fadeNav { client?.setScreen(parent) }
     }
 }
 
