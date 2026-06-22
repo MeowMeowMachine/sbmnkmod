@@ -338,6 +338,7 @@ class AutoReplyEditScreen(
                 Text.literal("§7• §f/ §7at start → executed as Minecraft command"),
                 Text.literal("§7• §f/say <msg> §7→ sends <msg> to the §ftriggering channel"),
                 Text.literal("§8  Guild trigger → /gc msg  ·  Party → /pc msg  ·  All → msg"),
+                Text.literal("§7• §f\$ign §7→ replaced with the sender's IGN"),
                 Text.literal(""),
                 Text.literal("§eExamples§r:"),
                 Text.literal("§3\"say hi\"§9;§c20§9;§3\"say whats up\""),

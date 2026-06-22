@@ -169,11 +169,14 @@ object AutoReplyHandler {
                     if (isSelf) " > detected self, ignoring" else "")
 
                 if (!isSelf) {
-                    val isSequence = response.contains(';')
-                    val replyDisplay = if (isSequence || response.startsWith("/"))
-                        Text.literal("'$response'").formatted(Formatting.AQUA)
+                    // Resolve $ign placeholder → sender's IGN
+                    val resolvedResponse = response.replace("\$ign", senderName)
+
+                    val isSequence = resolvedResponse.contains(';')
+                    val replyDisplay = if (isSequence || resolvedResponse.startsWith("/"))
+                        Text.literal("'$resolvedResponse'").formatted(Formatting.AQUA)
                     else
-                        Text.literal("'$response'").withColor(COLOR_WORD)
+                        Text.literal("'$resolvedResponse'").withColor(COLOR_WORD)
 
                     val notif = ModCommand.mnkPrefix()
                         .append(Text.literal(senderName).withColor(COLOR_IGN))
@@ -187,7 +190,7 @@ object AutoReplyHandler {
                         PositionedSoundInstance.ui(SoundEvents.ENTITY_EXPERIENCE_ORB_PICKUP, 1.0f)
                     )
 
-                    sendReply(channel, response)
+                    sendReply(channel, resolvedResponse)
                     lastReplyAt = now
                 }
                 break
