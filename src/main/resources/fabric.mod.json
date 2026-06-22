@@ -1,0 +1,23 @@
+{
+	"schemaVersion": 1,
+	"id": "mnk",
+	"version": "${version}",
+	"name": "Mnk",
+	"description": "Hypixel Chat Auto-Reply & Feature-Mod",
+	"authors": ["MeowMeowMachine"],
+	"license": "MIT",
+	"icon": "assets/mnk/icon.png",
+	"environment": "client",
+	"entrypoints": {
+		"client": [
+			{ "adapter": "kotlin", "value": "machine.meow.MnkClient"}
+		]
+	},
+	"depends": {
+		"fabricloader": ">=0.16.0",
+		"minecraft": "~1.21.11",
+		"java": ">=21",
+		"fabric-api": "*",
+		"fabric-language-kotlin": ">=1.13.12"
+	}
+}

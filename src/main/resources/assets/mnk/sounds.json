@@ -1,0 +1,39 @@
+{
+  "gui.click_bool": {
+    "subtitle": "mnk.subtitle.gui.click_bool",
+    "sounds": [
+      {
+        "name": "mnk:gui/click_bool",
+        "stream": false
+      }
+    ]
+  },
+  "gui.click_exit": {
+    "subtitle": "mnk.subtitle.gui.click_exit",
+    "sounds": [
+      {
+        "name": "mnk:gui/click_exit",
+        "stream": false
+      }
+    ]
+  },
+  "gui.click_header": {
+    "subtitle": "mnk.subtitle.gui.click_header",
+    "sounds": [
+      {
+        "name": "mnk:gui/click_header",
+        "stream": false
+      }
+    ]
+  },
+  "gui.click_general": {
+    "subtitle": "mnk.subtitle.gui.click_general",
+    "sounds": [
+      {
+        "name": "mnk:gui/click_general",
+        "stream": false
+      }
+    ]
+  }
+}
+
