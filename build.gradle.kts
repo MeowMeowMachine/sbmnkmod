@@ -1,7 +1,9 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
-	id("fabric-loom") version "1.17-SNAPSHOT"
+	// Use a stable Loom release instead of the snapshot to avoid runtime mapping/bytecode
+	// incompatibilities with the Minecraft 1.21.x mappings.
+	id("fabric-loom") version "1.17.12"
 
 	id("maven-publish")
 

@@ -37,30 +37,39 @@ class AutoReplyEditScreen(
 
     private lateinit var activeToggleBtn: CustomButtonWidget
 
-    /** Verhindert, dass close() saveFields() nochmals aufruft, wenn ein Button-Handler
-     *  saveFields() bereits aufgerufen und danach rule.options modifiziert hat. */
+    // ── New feature fields ──────────────────────────────────────────────────
+    private lateinit var cooldownField: TextFieldWidget
+    /** Nullable – only added to screen when rule.preventLoops == true */
+    private var loopSecondsField: TextFieldWidget? = null
+
+    /** Verhindert, dass close() saveFields() nochmals aufruft. */
     private var suppressSaveOnClose = false
 
     // Label Y positions
-    private var labelNameY    = 0
-    private var labelTriggerY = 0
-    private var labelChanY    = 0
-    private var labelOptY     = 0
+    private var labelNameY      = 0
+    private var labelTriggerY   = 0
+    private var labelChanY      = 0
+    private var labelCooldownY  = 0
+    private var labelPreventY   = 0
+    private var labelOptY       = 0
 
     /** Summe aller Weight-Felder. */
     private fun currentWeightSum() = optionWeightFields.sumOf { it.text.toIntOrNull() ?: 0 }
 
     // Spalten-Layout für Options-Zeilen
-    // [  Reply text field (fieldW-150)  ] [Weight 64px] [chance 48px] [Del 36px]
     private val COL_DEL_W    = 36
     private val COL_CHANCE_W = 48
     private val COL_WEIGHT_W = 64
     private val COL_GAP      = 4
-    // X-Offsets vom rechten Ende des fieldX+fieldW:
     private val xDel     get() = panelX + 16 + (panelW - 32) - COL_DEL_W
     private val xChance  get() = xDel - COL_GAP - COL_CHANCE_W
     private val xWeight  get() = xChance - COL_GAP - COL_WEIGHT_W
     private val textFW   get() = xWeight - COL_GAP - (panelX + 16)
+
+    // Layout constants for new rows
+    private val COOLDOWN_FIELD_W = 72
+    private val PREVENT_TOGGLE_W = 176
+    private val LOOP_SEC_FIELD_W = 60
 
     override fun init() {
         val px = panelX; val py = panelY; val pw = panelW; val ph = panelH
@@ -70,16 +79,15 @@ class AutoReplyEditScreen(
         // ── Name field ─────────────────────────────────────────────────────
         labelNameY = y - 9
         nameField = TextFieldWidget(textRenderer, fieldX, y, pw - 32, 20, Text.literal("Name"))
-        nameField.setMaxLength(64)  // vor .text setzen!
+        nameField.setMaxLength(64)
         nameField.text = rule.name
-        // Kein setSuggestion – Placeholder wird manuell gerendert (kein Overflow)
         addDrawableChild(nameField)
         y += 28
 
         // ── Trigger field ───────────────────────────────────────────────────
         labelTriggerY = y - 9
         triggerField = TextFieldWidget(textRenderer, fieldX, y, pw - 32, 20, Text.literal("Trigger (regex)"))
-        triggerField.setMaxLength(128)  // vor .text setzen!
+        triggerField.setMaxLength(128)
         triggerField.text = rule.triggerRegex
         addDrawableChild(triggerField)
         y += 32
@@ -120,6 +128,47 @@ class AutoReplyEditScreen(
         })
         y += 30
 
+        // ── Reply Delay ─────────────────────────────────────────────────────
+        // Compact row: label on the left, small field on the right
+        labelCooldownY = y + 5   // vertically centred to the field
+        val cooldownFieldX = px + pw - 16 - COOLDOWN_FIELD_W
+        cooldownField = TextFieldWidget(textRenderer, cooldownFieldX, y, COOLDOWN_FIELD_W, 20, Text.literal("Cooldown"))
+        cooldownField.setMaxLength(8)
+        // Display as seconds with up to 2 decimal places, no trailing zeros
+        val displaySecs = "%.2f".format(rule.cooldownMs / 1000.0).trimEnd('0').trimEnd('.')
+        cooldownField.text = displaySecs
+        cooldownField.setTextPredicate { s ->
+            s.isEmpty() || s.matches(Regex("^\\d{0,5}(\\.\\d{0,3})?\$"))
+        }
+        addDrawableChild(cooldownField)
+        y += 28
+
+        // ── Prevent Loops toggle + seconds field ────────────────────────────
+        labelPreventY = y
+        addDrawableChild(CustomButtonWidget.toggle(fieldX, y, PREVENT_TOGGLE_W, 20, rule.preventLoops, "Prevent Loops") { btn ->
+            saveFields()
+            rule.preventLoops = !rule.preventLoops
+            btn.applyToggle(rule.preventLoops, "Prevent Loops")
+            suppressSaveOnClose = true
+            client?.setScreen(AutoReplyEditScreen(parent, rule))
+        })
+
+        // Seconds field — only added when preventLoops is active
+        if (rule.preventLoops) {
+            val loopFieldX = fieldX + PREVENT_TOGGLE_W + 6
+            val lsf = TextFieldWidget(textRenderer, loopFieldX, y, LOOP_SEC_FIELD_W, 20, Text.literal("Loop sec"))
+            lsf.setMaxLength(4)
+            lsf.text = rule.preventLoopSeconds.toString()
+            lsf.setTextPredicate { s ->
+                s.isEmpty() || (s.all { c -> c.isDigit() } && (s.toIntOrNull() ?: 0) in 1..9999)
+            }
+            addDrawableChild(lsf)
+            loopSecondsField = lsf
+        } else {
+            loopSecondsField = null
+        }
+        y += 30
+
         // ── Reply options ───────────────────────────────────────────────────
         labelOptY = y - 9
         optionTextFields.clear()
@@ -129,18 +178,15 @@ class AutoReplyEditScreen(
             val rowY = y
             optionRowYs.add(rowY)
 
-            // Text field – color managed per-frame in render() based on focus state
             val tf = TextFieldWidget(textRenderer, fieldX, rowY, textFW, 20, Text.literal("Reply text"))
-            tf.setMaxLength(256)  // MUSS vor tf.text gesetzt werden – Default ist 32!
+            tf.setMaxLength(256)
             tf.text = option.text
             addDrawableChild(tf)
             optionTextFields.add(tf)
 
-            // Weight field – digits only, range [0, Int.MAX_VALUE]
             val wf = TextFieldWidget(textRenderer, xWeight, rowY, COL_WEIGHT_W, 20, Text.literal("Weight"))
-            wf.setMaxLength(10)   // MUSS vor wf.text gesetzt werden – Int.MAX_VALUE = 2147483647 → 10 digits
+            wf.setMaxLength(10)
             wf.text = option.weight.coerceAtLeast(0).toString()
-            // Only allow digit characters; reject minus / letters / symbols
             wf.setTextPredicate { s ->
                 s.isEmpty() || (s.all { c -> c.isDigit() } &&
                     (s.toLongOrNull() ?: Long.MAX_VALUE) <= Int.MAX_VALUE)
@@ -175,6 +221,14 @@ class AutoReplyEditScreen(
     private fun saveFields() {
         rule.name         = nameField.text
         rule.triggerRegex = triggerField.text
+        // Cooldown: parse as seconds → convert to ms
+        rule.cooldownMs   = ((cooldownField.text.toDoubleOrNull() ?: 1.5) * 1000.0)
+            .toLong().coerceAtLeast(0L)
+        // Loop seconds
+        loopSecondsField?.let { f ->
+            rule.preventLoopSeconds = f.text.toIntOrNull()?.coerceIn(1, 9999)
+                ?: rule.preventLoopSeconds
+        }
         for (i in rule.options.indices) {
             if (i < optionTextFields.size)   rule.options[i].text   = optionTextFields[i].text
             if (i < optionWeightFields.size) rule.options[i].weight =
@@ -289,6 +343,18 @@ class AutoReplyEditScreen(
         GuiHelper.drawTextLeft(context, textRenderer, "Trigger Regex", panelX + 16, labelTriggerY, lc)
         GuiHelper.drawTextLeft(context, textRenderer, "Channels",      panelX + 16, labelChanY,    lc)
 
+        // ── Reply Delay label (inline, left-aligned, vertically centred to field) ──
+        GuiHelper.drawTextLeft(context, textRenderer, "Reply Delay (s)", panelX + 16, labelCooldownY, lc)
+
+        // ── Prevent Loops: "s" unit label after the seconds field ───────────
+        loopSecondsField?.let { lsf ->
+            val sLabelX = lsf.x + lsf.width + 5
+            context.getTextConsumer().text(
+                Text.literal("s").withColor(lc),
+                sLabelX, sLabelX + 14, lsf.y + 6, lsf.y + 15
+            )
+        }
+
         // ── Reply Options Label + Chance-Header ─────────────────────────────
         val total = currentWeightSum()
         if (rule.options.isNotEmpty()) {
@@ -309,25 +375,20 @@ class AutoReplyEditScreen(
         )
 
         // ── Per-frame field colour management ──────────────────────────────
-        // setEditableColor needs 0xFF alpha (ARGB) to be visible in MC 1.21.11.
-        // When focused  → plain cyan / white (user can see cursor & selection).
-        // When unfocused with sequence/cmd → near-black (we draw coloured overlay).
-        // When unfocused plain text         → normal white.
         for (tf in optionTextFields) {
             val t = tf.text
             val isSeq = t.startsWith("/") || t.contains(";")
             tf.setEditableColor(when {
-                tf.isFocused && isSeq -> 0xFF55FFFF.toInt()   // focused, aqua
-                tf.isFocused          -> 0xFFE0E0E0.toInt()   // focused, white
-                isSeq                 -> 0xFF000000.toInt()   // unfocused: hide (overlay drawn below)
-                else                  -> 0xFFE0E0E0.toInt()   // unfocused plain text
+                tf.isFocused && isSeq -> 0xFF55FFFF.toInt()
+                tf.isFocused          -> 0xFFE0E0E0.toInt()
+                isSeq                 -> 0xFF000000.toInt()
+                else                  -> 0xFFE0E0E0.toInt()
             })
         }
 
         super.render(context, mouseX, mouseY, delta)
 
         // ── Placeholder texts after super.render() ─────────────────────────
-        // getTextConsumer().text() clips to [x1..x2], no scissor needed
         val hintColor = 0x666680
         if (nameField.text.isEmpty() && !nameField.isFocused) {
             context.getTextConsumer().text(
@@ -344,6 +405,16 @@ class AutoReplyEditScreen(
             )
         }
 
+        // ── Placeholder for loop seconds field ──────────────────────────────
+        loopSecondsField?.let { lsf ->
+            if (lsf.text.isEmpty() && !lsf.isFocused) {
+                context.getTextConsumer().text(
+                    Text.literal("10").withColor(hintColor),
+                    lsf.x + 4, lsf.x + lsf.width - 4, lsf.y + 6, lsf.y + 15
+                )
+            }
+        }
+
         // ── Per row: chance value, placeholder, syntax highlight ───────────
         if (rule.options.isNotEmpty()) {
             for (i in optionRowYs.indices) {
@@ -354,12 +425,10 @@ class AutoReplyEditScreen(
                 if (tf != null) {
                     val t = tf.text
                     when {
-                        // Empty field → placeholder hint
                         t.isEmpty() && !tf.isFocused -> context.getTextConsumer().text(
                             Text.literal("Reply text").withColor(hintColor),
                             tf.x + 4, tf.x + tf.width - 4, tf.y + 6, tf.y + 15
                         )
-                        // Non-focused sequence/command → §3/§9/§c syntax highlight overlay
                         !tf.isFocused && (t.startsWith("/") || t.contains(";")) ->
                             drawSyntaxHighlight(context, t, tf.x + 4, tf.y + 6, tf.x + tf.width - 4)
                     }

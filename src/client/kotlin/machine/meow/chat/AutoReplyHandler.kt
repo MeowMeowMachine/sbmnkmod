@@ -15,9 +15,6 @@ import net.minecraft.util.Formatting
 object AutoReplyHandler {
     private val LOGGER = MnkClient.LOGGER
 
-    private var lastReplyAt: Long = 0L
-    private const val COOLDOWN_MS = 1500L
-
     /** Scan-Throttle: verhindert Flooding wenn mehrere User die Mod benutzen. */
     private var lastScanAt: Long = 0L
     private const val SCAN_COOLDOWN_MS = 100L
@@ -25,6 +22,18 @@ object AutoReplyHandler {
     private data class SentEntry(val text: String, val sentAt: Long)
     private val recentlySent = ArrayDeque<SentEntry>()
     private const val ANTI_LOOP_WINDOW_MS = 8_000L
+
+    /** Per-rule reply cooldown tracking: rule.name → last reply timestamp (ms). */
+    private val ruleLastReplyAt = HashMap<String, Long>()
+
+    /** State for Prevent-Loops detection, per rule per sender. */
+    private data class LoopState(
+        var lastTriggerAt: Long = 0L,
+        var suspectMessage: String? = null,
+        var suspectWindowEnd: Long = 0L
+    )
+    /** rule.name → senderName → LoopState */
+    private val loopTrackers = HashMap<String, HashMap<String, LoopState>>()
 
     /** Queue für verzögerte sequenzielle Commands/Nachrichten. */
     private data class QueuedAction(val channel: ChatChannel, val text: String, val executeAt: Long)
@@ -38,12 +47,10 @@ object AutoReplyHandler {
         // ── Tick-Event: verarbeitet verzögerte Actions aus der Queue ───────
         ClientTickEvents.END_CLIENT_TICK.register { client ->
             if (actionQueue.isEmpty()) return@register
-            // Wenn Auto-Reply mid-sequence deaktiviert wurde → Queue sofort leeren
             if (!ModConfig.autoReplyEnabled) {
                 actionQueue.clear()
                 return@register
             }
-            // Not connected → discard queue, otherwise it would fire after reconnect
             val handler = client.networkHandler
             if (handler == null) {
                 actionQueue.clear()
@@ -77,7 +84,7 @@ object AutoReplyHandler {
             else LOGGER.debug("[mnk] CHAT – no detection for: {}", rawLine)
         }
 
-        LOGGER.info("[mnk] AutoReplyHandler registered (cooldown: ${COOLDOWN_MS}ms)")
+        LOGGER.info("[mnk] AutoReplyHandler registered (scan throttle: ${SCAN_COOLDOWN_MS}ms, per-rule cooldowns)")
     }
 
     /**
@@ -137,8 +144,6 @@ object AutoReplyHandler {
         if (now - lastScanAt < SCAN_COOLDOWN_MS) return
         lastScanAt = now
 
-        if (now - lastReplyAt < COOLDOWN_MS) return
-
         // Purge stale anti-loop entries
         val cutoff = now - ANTI_LOOP_WINDOW_MS
         while (recentlySent.isNotEmpty() && recentlySent.first().sentAt < cutoff) {
@@ -161,15 +166,46 @@ object AutoReplyHandler {
             }.getOrDefault(false)
 
             if (matches) {
-                val response = rule.pickResponse()?.takeIf { it.isNotBlank() } ?: continue
-                val isSelf   = senderName.equals(selfName, ignoreCase = true)
+                val isSelf = senderName.equals(selfName, ignoreCase = true)
 
                 LOGGER.info("[MNK] {} triggered auto-reply with '{}' (rule: '{}'){}",
                     senderName, cleanMsg, rule.name,
                     if (isSelf) " > detected self, ignoring" else "")
 
                 if (!isSelf) {
-                    // Resolve $ign placeholder → sender's IGN
+                    // ── Per-rule cooldown ──────────────────────────────────────
+                    val ruleLastReply = ruleLastReplyAt[rule.name] ?: 0L
+                    if (now - ruleLastReply < rule.cooldownMs) break
+
+                    // ── Prevent-Loops detection ────────────────────────────────
+                    if (rule.preventLoops) {
+                        val windowMs  = rule.preventLoopSeconds * 1000L
+                        val stateMap  = loopTrackers.getOrPut(rule.name) { HashMap() }
+                        val state     = stateMap.getOrPut(senderName) { LoopState() }
+
+                        // Suspect window active and same message seen again → loop!
+                        if (state.suspectMessage != null && now < state.suspectWindowEnd &&
+                            cleanMsg.equals(state.suspectMessage, ignoreCase = true)) {
+
+                            val notif = ModCommand.mnkPrefix()
+                                .append(Text.literal("Detected Loop Replies between you and ").withColor(COLOR_BODY))
+                                .append(Text.literal(senderName).withColor(COLOR_IGN))
+                                .append(Text.literal(". Reply has been cancelled").withColor(COLOR_BODY))
+                            mc.inGameHud?.chatHud?.addMessage(notif)
+                            state.suspectMessage  = null
+                            state.suspectWindowEnd = 0L
+                            break  // don't reply
+                        }
+
+                        // Same person triggered again within window → enter suspect mode
+                        if (now - state.lastTriggerAt < windowMs) {
+                            state.suspectMessage  = cleanMsg
+                            state.suspectWindowEnd = now + windowMs
+                        }
+                        state.lastTriggerAt = now
+                    }
+
+                    val response = rule.pickResponse()?.takeIf { it.isNotBlank() } ?: break
                     val resolvedResponse = response.replace("\$ign", senderName)
 
                     val isSequence = resolvedResponse.contains(';')
@@ -191,7 +227,7 @@ object AutoReplyHandler {
                     )
 
                     sendReply(channel, resolvedResponse)
-                    lastReplyAt = now
+                    ruleLastReplyAt[rule.name] = now
                 }
                 break
             }
@@ -256,8 +292,9 @@ object AutoReplyHandler {
     fun fullReset() {
         actionQueue.clear()
         recentlySent.clear()
-        lastReplyAt = 0L
-        lastScanAt  = 0L
+        ruleLastReplyAt.clear()
+        loopTrackers.clear()
+        lastScanAt = 0L
     }
 
     /**

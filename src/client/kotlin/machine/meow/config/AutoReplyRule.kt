@@ -12,7 +12,13 @@ data class AutoReplyRule(
     var onCoop: Boolean = true,
     var onAll: Boolean = true,
     var caseSensitive: Boolean = false,
-    var options: MutableList<ReplyOption> = mutableListOf()
+    var options: MutableList<ReplyOption> = mutableListOf(),
+    /** Per-rule reply cooldown in milliseconds (default 1.5 s). */
+    var cooldownMs: Long = 1500L,
+    /** Whether loop-detection is active for this rule. */
+    var preventLoops: Boolean = true,
+    /** Window in seconds used for loop detection. */
+    var preventLoopSeconds: Int = 10
 ) {
     fun appliesTo(channel: ChatChannel): Boolean = when (channel) {
         ChatChannel.GUILD -> onGuild
