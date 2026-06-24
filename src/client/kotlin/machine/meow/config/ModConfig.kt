@@ -10,7 +10,7 @@ object ModConfig {
 
     var autoReplyEnabled: Boolean = true
     var autoReplyRules: MutableList<AutoReplyRule> = mutableListOf()
-    // Platz für weitere Features, z.B.:
+    // Space for additional features, e.g.:
     // var someOtherFeatureEnabled: Boolean = false
 
     private data class Data(

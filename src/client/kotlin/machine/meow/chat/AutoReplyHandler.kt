@@ -35,7 +35,7 @@ object AutoReplyHandler {
     /** rule.name → senderName → LoopState */
     private val loopTrackers = HashMap<String, HashMap<String, LoopState>>()
 
-    /** Queue für verzögerte sequenzielle Commands/Nachrichten. */
+    /** Queue for delayed sequential commands/messages. */
     private data class QueuedAction(val channel: ChatChannel, val text: String, val executeAt: Long)
     private val actionQueue = ArrayDeque<QueuedAction>()
 
@@ -44,7 +44,7 @@ object AutoReplyHandler {
     private val COLOR_WORD = 0xEEEEFF
 
     fun register() {
-        // ── Tick-Event: verarbeitet verzögerte Actions aus der Queue ───────
+        // ── Tick event: process delayed actions from the queue ─────────────
         ClientTickEvents.END_CLIENT_TICK.register { client ->
             if (actionQueue.isEmpty()) return@register
             if (!ModConfig.autoReplyEnabled) {
@@ -99,12 +99,154 @@ object AutoReplyHandler {
         .trim()
 
     /**
-     * Parst das Sequence-Format: `"cmd1";delay1;"cmd2";delay2;...`
-     * - Delays in Ticks (1 Tick = 50 ms, 20 Ticks = 1 s)
-     * - Strings können in " " eingeschlossen sein (optional)
-     * - Kein Semikolon → einfacher Text, wird sofort gesendet
+     * Advanced template matcher.
+     * Template supports quoted segments and $macros inside quoted segments.
+     * Behavior:
+     *  - Unquoted text must appear in order in the message.
+     *  - Quoted segment starting with "$name" and closed: captures a single word.
+     *  - Quoted segment "$name stopword" (closed) captures up until the stopword.
+     *  - Quoted segment without a closing quote starting with "$name" captures the rest of the message.
+     * Returns Pair(matchBoolean, capturesMap).
+     */
+    private fun matchAdvanced(template: String, message: String, caseSensitive: Boolean, exact: Boolean): Pair<Boolean, Map<String, String>> {
+        val origMsg = message
+        val msg = if (caseSensitive) message else message.lowercase()
+        val tpl = if (caseSensitive) template else template.lowercase()
+
+        data class Token(val quoted: Boolean, val content: String, val closed: Boolean)
+        val tokens = mutableListOf<Token>()
+
+        var i = 0
+        while (i < tpl.length) {
+            if (tpl[i] == '"') {
+                val j = tpl.indexOf('"', i + 1)
+                if (j >= 0) {
+                    tokens.add(Token(true, tpl.substring(i + 1, j), true))
+                    i = j + 1
+                } else {
+                    tokens.add(Token(true, tpl.substring(i + 1), false))
+                    break
+                }
+            } else {
+                val j = tpl.indexOf('"', i)
+                if (j >= 0) {
+                    tokens.add(Token(false, tpl.substring(i, j), true))
+                    i = j
+                } else {
+                    tokens.add(Token(false, tpl.substring(i), true))
+                    break
+                }
+            }
+        }
+
+        var pos = 0
+        val caps = HashMap<String, String>()
+
+        for (token in tokens) {
+            val content = token.content
+            if (!token.quoted) {
+                val lit = content
+                if (lit.isBlank()) continue
+                // Support simple OR/alternation groups of the form (a,b,c) inside the
+                // literal content. Expand variants and try to match any of them.
+                fun expandOrVariants(s: String): List<String> {
+                    val start = s.indexOf('(')
+                    if (start < 0) return listOf(s)
+                    val end = s.indexOf(')', start + 1)
+                    if (end < 0) return listOf(s)
+                    val inside = s.substring(start + 1, end)
+                    val parts = inside.split(',').map { it.trim() }
+                    val results = mutableListOf<String>()
+                    for (p in parts) {
+                        val replaced = s.substring(0, start) + p + s.substring(end + 1)
+                        results.addAll(expandOrVariants(replaced))
+                    }
+                    return results
+                }
+
+                val variants = expandOrVariants(lit)
+                if (exact) {
+                    // In exact mode, the literal must match at the current position
+                    var matched = false
+                    var matchedLen = 0
+                    for (v in variants) {
+                        if (msg.startsWith(v, pos)) {
+                            matched = true
+                            matchedLen = v.length
+                            break
+                        }
+                    }
+                    if (!matched) return Pair(false, emptyMap())
+                    pos += matchedLen
+                } else {
+                    var bestIdx = Int.MAX_VALUE
+                    var bestLen = 0
+                    for (v in variants) {
+                        val idx = msg.indexOf(v, pos)
+                        if (idx >= 0 && idx < bestIdx) {
+                            bestIdx = idx
+                            bestLen = v.length
+                        }
+                    }
+                    if (bestIdx == Int.MAX_VALUE) return Pair(false, emptyMap())
+                    pos = bestIdx + bestLen
+                }
+            } else {
+                val seg = content.trim()
+                if (seg.isEmpty()) continue
+                if (!seg.startsWith("$")) {
+                    // quoted literal: must match
+                    val idx = msg.indexOf(seg, pos)
+                    if (idx < 0) return Pair(false, emptyMap())
+                    pos = idx + seg.length
+                } else {
+                    // macro handling
+                    val parts = seg.split(Regex("\\s+"), 2)
+                    val macro = parts[0].removePrefix("$")
+                    if (!token.closed) {
+                        // capture rest of message
+                        val start = skipSpacesIndex(msg, pos)
+                        val captured = origMsg.substring(start)
+                        caps[macro] = captured.trim()
+                        pos = msg.length
+                    } else if (parts.size == 1) {
+                        // capture single word
+                        var s = skipSpacesIndex(msg, pos)
+                        if (s >= msg.length) return Pair(false, emptyMap())
+                        var e = s
+                        while (e < msg.length && !msg[e].isWhitespace()) e++
+                        val captured = origMsg.substring(s, e)
+                        caps[macro] = captured
+                        pos = e
+                    } else {
+                        // capture until stopword
+                        val stop = parts[1]
+                        val idx = msg.indexOf(stop, pos)
+                        if (idx < 0) return Pair(false, emptyMap())
+                        val captured = origMsg.substring(pos, idx).trim()
+                        caps[macro] = captured
+                        pos = idx + stop.length
+                    }
+                }
+            }
+        }
+
+        return Pair(true, caps)
+    }
+
+    private fun skipSpacesIndex(s: String, from: Int): Int {
+        var i = from
+        while (i < s.length && s[i].isWhitespace()) i++
+        return i
+    }
+
+    /**
+     * Parses the sequence format: `"cmd1";delay1;"cmd2";delay2;...`
+     * - Delays are in ticks (1 tick = 50 ms, 20 ticks = 1 s)
+     * - Strings can be optionally wrapped in double quotes
+     * - No semicolon means simple text that will be sent immediately
      *
-     * Gibt eine Liste von (commandText, absoluteDelayMs) zurück.
+     * Returns a list of (commandText, absoluteDelayMs).
      */
     internal fun parseSequence(raw: String): List<Pair<String, Long>> {
         if (!raw.contains(';')) {
@@ -160,13 +302,28 @@ object AutoReplyHandler {
             if (!rule.enabled) continue
             if (!rule.appliesTo(channel)) continue
 
-            val regexOpts = if (rule.caseSensitive) emptySet() else setOf(RegexOption.IGNORE_CASE)
-            val matches = runCatching {
-                chatMessage.contains(Regex(rule.triggerRegex, regexOpts))
-            }.getOrDefault(false)
+            // Matching: simple regex or advanced template mode
+            val captures = HashMap<String, String>()
+            val matches = if (!rule.triggerAdvanced) {
+                val regexOpts = if (rule.caseSensitive) emptySet() else setOf(RegexOption.IGNORE_CASE)
+                val regex = Regex(rule.triggerRegex, regexOpts)
+                runCatching {
+                    if (rule.triggerExact) regex.matchEntire(chatMessage) != null
+                    else chatMessage.contains(regex)
+                }.getOrDefault(false)
+            } else {
+                val (ok, caps) = matchAdvanced(rule.triggerRegex, chatMessage, rule.caseSensitive, rule.triggerExact)
+                if (ok) captures.putAll(caps)
+                ok
+            }
 
             if (matches) {
-                val isSelf = senderName.equals(selfName, ignoreCase = true)
+                val ignCaptured = captures["ign"]?.trim()
+                val isSelf = if (ignCaptured != null) {
+                    ignCaptured.equals(selfName, ignoreCase = true)
+                } else {
+                    senderName.equals(selfName, ignoreCase = true)
+                }
 
                 LOGGER.info("[MNK] {} triggered auto-reply with '{}' (rule: '{}'){}",
                     senderName, cleanMsg, rule.name,
@@ -206,13 +363,74 @@ object AutoReplyHandler {
                     }
 
                     val response = rule.pickResponse()?.takeIf { it.isNotBlank() } ?: break
-                    val resolvedResponse = response.replace("\$ign", senderName)
+                    // Resolve macros inside the response. Captured macros from the advanced
+                    // trigger take precedence; fallback to senderName for $ign.
+                    var resolvedResponse = response
+                    for ((k, v) in captures) {
+                        resolvedResponse = resolvedResponse.replace("\$$k", v)
+                    }
+                    if (!captures.containsKey("ign")) {
+                        resolvedResponse = resolvedResponse.replace("\$ign", senderName)
+                    }
 
-                    val isSequence = resolvedResponse.contains(';')
-                    val replyDisplay = if (isSequence || resolvedResponse.startsWith("/"))
-                        Text.literal("'$resolvedResponse'").formatted(Formatting.AQUA)
-                    else
-                        Text.literal("'$resolvedResponse'").withColor(COLOR_WORD)
+                    // Build a coloured preview where each macro ($name) is assigned a cycling colour
+                    val originalResponse = response
+                    val MACRO_RE = Regex("\\$[A-Za-z0-9_]+")
+                    val palette = listOf(0xFFAA00, 0x00AAAA, 0x55AAFF, 0xFF66AA)
+
+                    // Determine macro order / colours from the trigger template when in Advanced mode
+                    val macroOrder = mutableListOf<String>()
+                    if (rule.triggerAdvanced) {
+                        for (m in MACRO_RE.findAll(rule.triggerRegex)) {
+                            val tok = m.value
+                            if (!macroOrder.contains(tok)) macroOrder.add(tok)
+                        }
+                    } else {
+                        for (m in MACRO_RE.findAll(originalResponse)) {
+                            val tok = m.value
+                            if (!macroOrder.contains(tok)) macroOrder.add(tok)
+                        }
+                    }
+                    val macroColor = HashMap<String, Int>()
+                    for ((i, tok) in macroOrder.withIndex()) {
+                        val col = palette[i % palette.size]
+                        macroColor[tok] = col
+                        macroColor[tok.removePrefix("$")] = col
+                    }
+
+                    val parts = MACRO_RE.findAll(originalResponse).toList()
+                    val builder = Text.literal("")
+                    if (parts.isEmpty()) {
+                        val isSeq = originalResponse.contains(';') || originalResponse.startsWith("/")
+                        val simple = if (isSeq) Text.literal("'${originalResponse}'").formatted(Formatting.AQUA)
+                                     else Text.literal("'${originalResponse}'").withColor(COLOR_WORD)
+                        builder.append(simple)
+                    } else {
+                        builder.append(Text.literal("'").withColor(COLOR_WORD))
+                        var last = 0
+                        for (m in parts) {
+                            val s = m.range.first
+                            val e = m.range.last + 1
+                            if (s > last) {
+                                val lit = originalResponse.substring(last, s)
+                                builder.append(Text.literal(lit).withColor(COLOR_WORD))
+                            }
+                            val tok = originalResponse.substring(s, e)
+                            val macroName = tok.removePrefix("$")
+                            val valStr = if (captures.containsKey(macroName)) captures[macroName]!!
+                                         else if (macroName == "ign") senderName
+                                         else tok
+                            val col = macroColor[tok] ?: palette[0]
+                            builder.append(Text.literal(valStr).withColor(col))
+                            last = e
+                        }
+                        if (last < originalResponse.length) {
+                            val tail = originalResponse.substring(last)
+                            builder.append(Text.literal(tail).withColor(COLOR_WORD))
+                        }
+                        builder.append(Text.literal("'").withColor(COLOR_WORD))
+                    }
+                    val replyDisplay = builder
 
                     val notif = ModCommand.mnkPrefix()
                         .append(Text.literal(senderName).withColor(COLOR_IGN))
@@ -275,19 +493,19 @@ object AutoReplyHandler {
         }
     }
 
-    // ── Öffentliche Kontroll-API (für Panic-Commands) ──────────────────────
+    // ── Public control API (used by panic commands) ───────────────────────
 
-    /** Leert die Action-Queue – laufende Sequenz wird sofort gestoppt. */
+    /** Clears the action queue – running sequences are stopped immediately. */
     fun clearQueue() {
         actionQueue.clear()
     }
 
-    /** Aktuelle Anzahl ausstehender Sequenz-Actions. */
+    /** Returns current number of pending sequence actions. */
     fun queueSize(): Int = actionQueue.size
 
     /**
-     * Vollständiger Reset: Queue + Verlauf + Cooldowns werden geleert.
-     * Auto-Reply bleibt dabei im aktuellen Zustand (an/aus).
+     * Full reset: clears queue, history and cooldowns.
+     * Auto-reply enabled/disabled state is preserved.
      */
     fun fullReset() {
         actionQueue.clear()
@@ -298,8 +516,8 @@ object AutoReplyHandler {
     }
 
     /**
-     * Notfall-Stop: deaktiviert Auto-Reply komplett, leert Queue + State.
-     * Speichert die Änderung in der Config.
+     * Emergency stop: disables auto-reply completely and clears queue/state.
+     * Saves the change to the config.
      */
     fun emergencyStop() {
         fullReset()

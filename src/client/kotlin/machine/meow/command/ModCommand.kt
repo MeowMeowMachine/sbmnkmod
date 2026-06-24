@@ -18,7 +18,7 @@ object ModCommand {
         ClientCommandRegistrationCallback.EVENT.register { dispatcher, _ ->
             dispatcher.register(
                 ClientCommandManager.literal("mnk")
-                    // /mnk  →  Hauptmenü öffnen
+                    // /mnk  →  open main menu
                     .executes { _ ->
                         val mc = MinecraftClient.getInstance()
                         mc.execute {

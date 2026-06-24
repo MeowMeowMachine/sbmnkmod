@@ -6,6 +6,10 @@ import kotlin.random.Random
 data class AutoReplyRule(
     var name: String = "New Rule",
     var triggerRegex: String = "hello",
+    /** When true, triggerRegex is interpreted in Advanced (macro) mode. */
+    var triggerAdvanced: Boolean = false,
+    /** When true, the trigger must match the whole message (exact match) instead of searching for a substring. */
+    var triggerExact: Boolean = false,
     var enabled: Boolean = true,
     var onGuild: Boolean = true,
     var onParty: Boolean = true,
@@ -27,7 +31,7 @@ data class AutoReplyRule(
         ChatChannel.ALL -> onAll
     }
 
-    /** Wählt eine Antwort gewichtet nach den Weight-Werten ("%"-Roll) aus. */
+    /** Picks a response according to the configured weights (percentage roll). */
     fun pickResponse(): String? {
         if (options.isEmpty()) return null
         val total = options.sumOf { it.weight.coerceAtLeast(0) }

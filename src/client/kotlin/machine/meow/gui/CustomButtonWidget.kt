@@ -65,6 +65,11 @@ class CustomButtonWidget(
         val GREEN_HOVER  = 0xFF44BB66.toInt()
         val RED_BORDER   = 0xFF7A2A2A.toInt()
         val RED_HOVER    = 0xFFBB4444.toInt()
+        // Additional color themes for non-boolean toggles (gold / aqua)
+        val GOLD_BORDER  = 0xFFAA7700.toInt()
+        val GOLD_HOVER   = 0xFFDDAA33.toInt()
+        val AQUA_BORDER  = 0xFF00AAAA.toInt()
+        val AQUA_HOVER   = 0xFF55FFFF.toInt()
 
         fun of(x: Int, y: Int, w: Int, h: Int, label: String,
                soundType: GuiSoundType = GuiSoundType.GENERAL,
