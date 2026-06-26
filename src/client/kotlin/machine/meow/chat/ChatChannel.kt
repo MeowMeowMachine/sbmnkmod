@@ -6,7 +6,10 @@ import java.util.regex.Pattern
 data class ChatDetection(
     val channel: ChatChannel,
     val message: String,
-    val senderName: String
+    val senderName: String,
+    /** The original cleaned raw line before any parsing.  Defaults to [message]
+     *  so that code that doesn't need the raw line is unaffected. */
+    val rawLine: String = message
 )
 
 /**

@@ -17,7 +17,10 @@ object AutoReplyHandler {
 
     /** Scan-Throttle: verhindert Flooding wenn mehrere User die Mod benutzen. */
     private var lastScanAt: Long = 0L
-    private const val SCAN_COOLDOWN_MS = 100L
+    // Reduced to 0 – per-rule cooldowns and the anti-loop window handle rate
+    // limiting more precisely.  A global 100 ms throttle caused back-to-back
+    // messages from different senders to be silently dropped.
+    private const val SCAN_COOLDOWN_MS = 0L
 
     private data class SentEntry(val text: String, val sentAt: Long)
     private val recentlySent = ArrayDeque<SentEntry>()
@@ -67,8 +70,14 @@ object AutoReplyHandler {
         ClientReceiveMessageEvents.GAME.register { message, _ ->
             if (!ModConfig.autoReplyEnabled) return@register
             val rawLine = cleanRaw(message.string)
-            val detection = ChatChannel.detect(rawLine)
-                ?: ChatChannel.detectByPrefix(rawLine)
+            // Standard detection (requires "Player: message" format).
+            // Attach the rawLine so processIncoming can try structured-line matching
+            // for Advanced templates that include the channel prefix / rank prefix.
+            // Fallback: try Advanced-mode rules directly against the raw line so that
+            // system messages like "Guild > Player joined." can also be matched.
+            val detection = ChatChannel.detect(rawLine)?.copy(rawLine = rawLine)
+                ?: ChatChannel.detectByPrefix(rawLine)?.copy(rawLine = rawLine)
+                ?: tryAdvancedRawMatch(rawLine)
             if (detection != null) processIncoming(detection)
             else LOGGER.debug("[mnk] GAME – no detection for: {}", rawLine)
         }
@@ -77,9 +86,27 @@ object AutoReplyHandler {
         ClientReceiveMessageEvents.CHAT.register { message, _, sender, _, _ ->
             if (!ModConfig.autoReplyEnabled) return@register
             val rawLine = cleanRaw(message.string)
-            val detection = ChatChannel.detect(rawLine)
-                ?: ChatChannel.detectByPrefix(rawLine)
-                ?: sender?.name?.let { name -> ChatDetection(ChatChannel.ALL, rawLine, name) }
+            val bySender = sender?.name
+            val selfName = MinecraftClient.getInstance().player?.gameProfile?.name
+
+            // Prefer structured detection (handles Hypixel + vanilla <Player> format).
+            // For the plain sender fallback we must extract ONLY the message body,
+            // not the whole rawLine (which still contains the "<Name> " prefix).
+            val detection = ChatChannel.detect(rawLine)?.copy(rawLine = rawLine)
+                ?: ChatChannel.detectByPrefix(rawLine)?.copy(rawLine = rawLine)
+                ?: if (bySender != null && !bySender.equals(selfName, ignoreCase = true)) {
+                    // Strip common vanilla prefix formats "<Name> " and "Name: " before
+                    // using rawLine as the chat message body, so rule regexes match just
+                    // the message text (not the sender prefix).
+                    val strippedMsg = when {
+                        rawLine.startsWith("<$bySender> ") ->
+                            rawLine.removePrefix("<$bySender> ")
+                        rawLine.startsWith("$bySender: ") ->
+                            rawLine.removePrefix("$bySender: ")
+                        else -> rawLine
+                    }
+                    ChatDetection(ChatChannel.ALL, strippedMsg, bySender, rawLine)
+                } else null
             if (detection != null) processIncoming(detection)
             else LOGGER.debug("[mnk] CHAT – no detection for: {}", rawLine)
         }
@@ -147,49 +174,129 @@ object AutoReplyHandler {
             if (!token.quoted) {
                 val lit = content
                 if (lit.isBlank()) continue
-                // Support simple OR/alternation groups of the form (a,b,c) inside the
-                // literal content. Expand variants and try to match any of them.
-                fun expandOrVariants(s: String): List<String> {
-                    val start = s.indexOf('(')
-                    if (start < 0) return listOf(s)
-                    val end = s.indexOf(')', start + 1)
-                    if (end < 0) return listOf(s)
-                    val inside = s.substring(start + 1, end)
-                    val parts = inside.split(',').map { it.trim() }
-                    val results = mutableListOf<String>()
-                    for (p in parts) {
-                        val replaced = s.substring(0, start) + p + s.substring(end + 1)
-                        results.addAll(expandOrVariants(replaced))
-                    }
-                    return results
-                }
 
-                val variants = expandOrVariants(lit)
-                if (exact) {
-                    // In exact mode, the literal must match at the current position
-                    var matched = false
-                    var matchedLen = 0
-                    for (v in variants) {
-                        if (msg.startsWith(v, pos)) {
-                            matched = true
-                            matchedLen = v.length
-                            break
+                // ── Special filter groups ────────────────────────────────────────
+                //
+                //  (pass;v1,v2,…)           – optional variants; text BEFORE ( is required.
+                //  (break;v1,v2,…)          – fails whole match if any variant is at this pos.
+                //  (store$macro;v1,v2,…)    – like pass, but stores the matched variant (or "")
+                //                             in $macro so you can use it in replies.
+                //
+                // The text BEFORE the group (pbPrefix) is ALWAYS mandatory for pass/store.
+                // Only the alternatives inside (…) are optional.
+                //
+                // ── Why pbPrefix is mandatory ────────────────────────────────────
+                // The Advanced matcher tries 3 targets: chatMessage, afterPrefix, rawLine.
+                // Without mandatory-prefix enforcement, template
+                //   "Guild > (pass;[MVP+]) "$ign" "$msg"
+                // would spuriously match target 2 ("[MVP+] Player: msg") because the pass
+                // group would silently no-op when "Guild > " was absent, and $ign would
+                // then incorrectly capture "[MVP+]" instead of the player name.
+                // With enforcement: pbPrefix "Guild > " must be present → target 2 fails →
+                // target 3 (rawLine "Guild > [MVP+] Player: msg") is tried and succeeds.
+                //
+                // ── Examples ─────────────────────────────────────────────────────
+                //  Guild > (pass;[MVP+],[VIP+]) "$ign" "$msg
+                //    [MVP+] → consumes "Guild > " + "[MVP+] " + captures ign=Name, msg=…  ✓
+                //    unranked → consumes "Guild > " only + captures ign=Name, msg=…        ✓
+                //
+                //  Guild > (store$rank;[MVP+],[VIP+]) "$ign" "$msg
+                //    [MVP+] → rank="[MVP+]", ign=Name, msg=…  ✓
+                //    unranked → rank="",      ign=Name, msg=…  ✓
+                //
+                //  (break;botA,botB) "$ign": text  → fails if "botA " or "botB " at pos   ✓
+                val pbGroupRe = Regex("\\((pass|break|store\\$[A-Za-z0-9_]+);([^)]+)\\)")
+                val pbMatch   = pbGroupRe.find(lit)
+
+                if (pbMatch != null) {
+                    val pbMod    = pbMatch.groupValues[1]   // "pass" | "break" | "store$name"
+                    val pbAlts   = pbMatch.groupValues[2].split(',').map { it.trim() }
+                    val pbPrefix = lit.substring(0, pbMatch.range.first)
+                    val pbSuffix = lit.substring(pbMatch.range.last + 1)
+
+                    /** Anchors/searches for pbPrefix; returns false if not found. Advances pos. */
+                    fun consumeMandatoryPrefix(): Boolean {
+                        if (pbPrefix.isEmpty()) return true
+                        val idx = if (exact) {
+                            if (msg.startsWith(pbPrefix, pos)) pos else -1
+                        } else {
+                            msg.indexOf(pbPrefix, pos)
+                        }
+                        if (idx < 0) return false
+                        pos = idx + pbPrefix.length
+                        return true
+                    }
+
+                    /** Tries each alt+suffix at current pos; advances pos and returns matched alt
+                     *  (original-case from origMsg), or null if nothing matched. */
+                    fun tryVariants(): String? {
+                        for (alt in pbAlts) {
+                            val cand = alt + pbSuffix
+                            if (msg.startsWith(cand, pos)) {
+                                val matched = origMsg.substring(pos, pos + alt.length)
+                                pos += cand.length
+                                return matched
+                            }
+                        }
+                        return null
+                    }
+
+                    when {
+                        pbMod == "pass" -> {
+                            if (!consumeMandatoryPrefix()) return Pair(false, emptyMap())
+                            tryVariants()   // optional — discard result
+                        }
+                        pbMod == "break" -> {
+                            // Negative filter: full candidate (prefix+alt+suffix) at pos → fail
+                            val candidates = pbAlts.map { alt -> pbPrefix + alt + pbSuffix }
+                            for (c in candidates) {
+                                if (msg.startsWith(c, pos)) return Pair(false, emptyMap())
+                            }
+                            // None matched → continue unchanged
+                        }
+                        pbMod.startsWith("store\$") -> {
+                            val storeMacro = pbMod.removePrefix("store\$")
+                            if (!consumeMandatoryPrefix()) return Pair(false, emptyMap())
+                            // Store matched variant in macro, or "" if nothing matched
+                            caps[storeMacro] = tryVariants() ?: ""
                         }
                     }
-                    if (!matched) return Pair(false, emptyMap())
-                    pos += matchedLen
                 } else {
-                    var bestIdx = Int.MAX_VALUE
-                    var bestLen = 0
-                    for (v in variants) {
-                        val idx = msg.indexOf(v, pos)
-                        if (idx >= 0 && idx < bestIdx) {
-                            bestIdx = idx
-                            bestLen = v.length
+                    // ── Normal literal with optional standard (v1,v2) OR-groups ──────
+                    // Support simple OR/alternation groups of the form (a,b,c) inside the
+                    // literal content. Expand variants and try to match any of them.
+                    fun expandOrVariants(s: String): List<String> {
+                        val start = s.indexOf('(')
+                        if (start < 0) return listOf(s)
+                        val end = s.indexOf(')', start + 1)
+                        if (end < 0) return listOf(s)
+                        val inside = s.substring(start + 1, end)
+                        val parts = inside.split(',').map { it.trim() }
+                        val results = mutableListOf<String>()
+                        for (p in parts) {
+                            val replaced = s.substring(0, start) + p + s.substring(end + 1)
+                            results.addAll(expandOrVariants(replaced))
                         }
+                        return results
                     }
-                    if (bestIdx == Int.MAX_VALUE) return Pair(false, emptyMap())
-                    pos = bestIdx + bestLen
+
+                    val variants = expandOrVariants(lit)
+                    if (exact) {
+                        var matched = false; var matchedLen = 0
+                        for (v in variants) {
+                            if (msg.startsWith(v, pos)) { matched = true; matchedLen = v.length; break }
+                        }
+                        if (!matched) return Pair(false, emptyMap())
+                        pos += matchedLen
+                    } else {
+                        var bestIdx = Int.MAX_VALUE; var bestLen = 0
+                        for (v in variants) {
+                            val idx = msg.indexOf(v, pos)
+                            if (idx >= 0 && idx < bestIdx) { bestIdx = idx; bestLen = v.length }
+                        }
+                        if (bestIdx == Int.MAX_VALUE) return Pair(false, emptyMap())
+                        pos = bestIdx + bestLen
+                    }
                 }
             } else {
                 val seg = content.trim()
@@ -241,6 +348,45 @@ object AutoReplyHandler {
     }
 
     /**
+     * Last-resort detection for GAME events: iterates every enabled Advanced-mode
+     * rule and tries to match its template directly against the full raw line.
+     *
+     * This is required for Hypixel system messages (e.g. "Guild > Player joined.")
+     * that have no conventional "Player: message" colon separator and therefore
+     * cannot be detected by [ChatChannel.detect] or [ChatChannel.detectByPrefix].
+     *
+     * On a successful match the whole rawLine becomes the `message` of the returned
+     * [ChatDetection].  When [processIncoming] re-runs the Advanced template
+     * against that same rawLine it will succeed again and extract the captures.
+     */
+    private fun tryAdvancedRawMatch(rawLine: String): ChatDetection? {
+        val selfName = MinecraftClient.getInstance().player?.gameProfile?.name ?: ""
+        for (rule in ModConfig.autoReplyRules) {
+            if (!rule.enabled || !rule.triggerAdvanced) continue
+            val (ok, caps) = matchAdvanced(rule.triggerRegex, rawLine, rule.caseSensitive, rule.triggerExact)
+            if (!ok) continue
+            // Determine which channel prefix the raw line belongs to.
+            val channel = when {
+                rawLine.startsWith("Guild > ") -> ChatChannel.GUILD
+                rawLine.startsWith("Party > ") -> ChatChannel.PARTY
+                rawLine.startsWith("Co-op > ") -> ChatChannel.COOP
+                else -> ChatChannel.ALL
+            }
+            if (!rule.appliesTo(channel)) continue
+            // Extract sender: prefer $player or $ign captures, fall back to "system".
+            val senderName = (caps["player"] ?: caps["ign"]
+                ?: caps.values.firstOrNull() ?: "system").trim()
+            // Never self-trigger.
+            if (senderName.equals(selfName, ignoreCase = true)) continue
+            LOGGER.debug("[mnk] tryAdvancedRawMatch: rule='{}' rawLine='{}' sender='{}'",
+                rule.name, rawLine, senderName)
+            // Pass the raw line as the message so processIncoming can re-match.
+            return ChatDetection(channel, rawLine, senderName)
+        }
+        return null
+    }
+
+    /**
      * Parses the sequence format: `"cmd1";delay1;"cmd2";delay2;...`
      * - Delays are in ticks (1 tick = 50 ms, 20 ticks = 1 s)
      * - Strings can be optionally wrapped in double quotes
@@ -279,6 +425,20 @@ object AutoReplyHandler {
     /** Shared processing for both GAME and CHAT events. */
     private fun processIncoming(detection: ChatDetection) {
         val (channel, chatMessage, senderName) = detection
+        val rawLine = detection.rawLine
+        // For Advanced templates the match is tried against up to three targets
+        // in order (first success wins):
+        //   1. chatMessage   – the extracted message content (backward-compat, simple rules)
+        //   2. afterPrefix   – rawLine minus the channel prefix ("Guild > " etc.)
+        //                      lets templates like "(pass;[MVP+]) "$ign"…" work without
+        //                      needing "Guild > " at the start
+        //   3. rawLine       – full raw line; for templates that start with "Guild > …"
+        val afterPrefix: String = when (channel) {
+            ChatChannel.GUILD -> rawLine.removePrefix("Guild > ")
+            ChatChannel.PARTY -> rawLine.removePrefix("Party > ")
+            ChatChannel.COOP  -> rawLine.removePrefix("Co-op > ")
+            else -> rawLine
+        }
 
         val now = System.currentTimeMillis()
 
@@ -312,9 +472,22 @@ object AutoReplyHandler {
                     else chatMessage.contains(regex)
                 }.getOrDefault(false)
             } else {
-                val (ok, caps) = matchAdvanced(rule.triggerRegex, chatMessage, rule.caseSensitive, rule.triggerExact)
-                if (ok) captures.putAll(caps)
-                ok
+                // Build the list of match targets in priority order.
+                // Only add a target if it is distinct from already-queued ones so
+                // we don't repeat the same string (e.g. when rawLine == chatMessage).
+                val targets = buildList {
+                    add(chatMessage)
+                    if (afterPrefix != chatMessage) add(afterPrefix)
+                    if (rawLine != afterPrefix && rawLine != chatMessage) add(rawLine)
+                }
+                var matched = false
+                for (target in targets) {
+                    val (ok, caps) = matchAdvanced(rule.triggerRegex, target, rule.caseSensitive, rule.triggerExact)
+                    LOGGER.debug("[mnk] rule='{}' target='{}' → ok={} caps={}", rule.name, target, ok, caps)
+                    if (ok) { captures.putAll(caps); matched = true; break }
+                }
+                if (!matched) LOGGER.debug("[mnk] rule='{}' – no target matched", rule.name)
+                matched
             }
 
             if (matches) {

@@ -20,13 +20,31 @@ class AutoReplyListScreen(private val parent: Screen) : Screen(Text.literal("Aut
     }
 
     private val panelW get() = (width  * 0.80).toInt()
-    private val panelH get() = (height * 0.80).toInt()
+    // panelH grows with the number of rules so the bottom buttons always travel
+    // along rather than getting buried under rule rows.
+    private var panelHVar = 0
+    private val panelH get() = panelHVar
     private val panelX get() = (width  - panelW) / 2
-    private val panelY get() = (height - panelH) / 2
+    // Anchor panel top: when the panel is smaller than the screen we centre it;
+    // when it grows large we keep it 20 px from the top so it never clips above
+    // the screen edge.
+    private val panelY get() = maxOf(10, (height - panelH) / 2)
+
+    /** Pixels required for the content rows (header + rules + bottom buttons). */
+    private fun requiredHeight(): Int {
+        val headerH  = 70                              // title bar + global toggle + label gap
+        val rowH     = ModConfig.autoReplyRules.size * 26
+        val footerH  = 60                              // "+ Add Rule" + "← Back"
+        return headerH + rowH + footerH
+    }
 
     override fun init() {
         openTime  = System.currentTimeMillis()
         closeTime = -1L
+
+        val base = (height * 0.80).toInt()
+        panelHVar = maxOf(base, requiredHeight()).coerceAtMost(height - 20)
+
         val px = panelX; val py = panelY; val pw = panelW; val ph = panelH
         val cx = px + pw / 2
 
@@ -38,19 +56,22 @@ class AutoReplyListScreen(private val parent: Screen) : Screen(Text.literal("Aut
             btn.applyToggle(ModConfig.autoReplyEnabled, "Auto-Reply")
         })
 
-        // Rule rows
+        // Rule rows – scissored below so they don't bleed over the bottom buttons
+        val rulesAreaY2 = py + ph - 60   // leave room for footer buttons
         var y = py + 70
         ModConfig.autoReplyRules.forEachIndexed { index, rule ->
             val rowY = y
-            val prefix = if (rule.enabled) "§a✔  " else "§c✗  "
-            addDrawableChild(CustomButtonWidget.of(px + 16, rowY, pw - 116, 22, "$prefix${rule.name}") {
-                client?.setScreen(AutoReplyEditScreen(this, rule))
-            })
-            addDrawableChild(CustomButtonWidget.red(px + pw - 96, rowY, 80, 22, "✕ Delete") {
-                ModConfig.autoReplyRules.removeAt(index)
-                ModConfig.save()
-                client?.setScreen(AutoReplyListScreen(parent))
-            })
+            if (rowY + 22 <= rulesAreaY2) {           // only add widgets that fit
+                val prefix = if (rule.enabled) "§a✔  " else "§c✗  "
+                addDrawableChild(CustomButtonWidget.of(px + 16, rowY, pw - 116, 22, "$prefix${rule.name}") {
+                    client?.setScreen(AutoReplyEditScreen(this, rule))
+                })
+                addDrawableChild(CustomButtonWidget.red(px + pw - 96, rowY, 80, 22, "✕ Delete") {
+                    ModConfig.autoReplyRules.removeAt(index)
+                    ModConfig.save()
+                    client?.setScreen(AutoReplyListScreen(parent))
+                })
+            }
             y += 26
         }
 
@@ -60,7 +81,7 @@ class AutoReplyListScreen(private val parent: Screen) : Screen(Text.literal("Aut
             ModConfig.save()
             client?.setScreen(AutoReplyEditScreen(this, newRule))
         })
-        addDrawableChild(CustomButtonWidget.of(cx - 55, py + ph - 28, 110, 22, "← Back") {
+        addDrawableChild(CustomButtonWidget.exit(cx - 55, py + ph - 28, 110, 22, "← Back") {
             fadeNav { client?.setScreen(parent) }
         })
     }

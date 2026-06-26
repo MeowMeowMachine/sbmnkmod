@@ -129,6 +129,11 @@ class FeatureListScreen(private val parent: Screen) : Screen(Text.literal("Featu
 
     // ── Input ────────────────────────────────────────────────────────────────
     override fun mouseScrolled(mouseX: Double, mouseY: Double, horizontalAmount: Double, verticalAmount: Double): Boolean {
+        // Only intercept scroll when the pointer is inside the scrollable content area
+        // and there is actually something to scroll.
+        val inContent = mouseX >= contentX && mouseX <= contentX + contentW &&
+                        mouseY >= contentY && mouseY <= contentY + contentH
+        if (!inContent || maxScroll == 0) return super.mouseScrolled(mouseX, mouseY, horizontalAmount, verticalAmount)
         scrollOffset = (scrollOffset - (verticalAmount * 16).toInt()).coerceIn(0, maxScroll)
         return true
     }
@@ -248,8 +253,15 @@ class FeatureListScreen(private val parent: Screen) : Screen(Text.literal("Featu
         val barH = contentH
         val barY = contentY
         context.fill(barX, barY, barX + 3, barY + barH, 0x33FFFFFF.toInt())
-        val thumbH = maxOf(12, (contentH.toFloat() / (contentH + maxScroll) * barH).toInt())
-        val thumbY = barY + ((scrollOffset.toFloat() / maxScroll) * (barH - thumbH)).toInt()
+        // Ensure thumb has a sensible minimum and never exceeds the bar height.
+        val rawThumb = (contentH.toFloat() / maxOf(1, contentH + maxScroll) * barH).toInt()
+        val thumbH = rawThumb.coerceIn(16, maxOf(16, barH - 4))
+        val thumbY = if (maxScroll > 0) {
+            val t = (scrollOffset.toFloat() / maxScroll) * (barH - thumbH)
+            (barY + t.toInt()).coerceIn(barY, barY + barH - thumbH)
+        } else {
+            barY
+        }
         context.fill(barX, thumbY, barX + 3, thumbY + thumbH, 0xAA5566EE.toInt())
     }
 

@@ -44,6 +44,7 @@ class AutoReplyEditScreen(
         // build macro colour map for this template so macros are coloured consistently
         val macroMap = buildMacroColorMapFromTemplate(text)
 
+        val fh = textRenderer.fontHeight
         var i = 0
         var curX = x
         while (i < text.length && curX < maxX) {
@@ -52,32 +53,32 @@ class AutoReplyEditScreen(
                 ch == '\\' -> {
                     val next = if (i + 1 < text.length) text.substring(i, i + 2) else text.substring(i, i + 1)
                     val w = textRenderer.getWidth(next)
-                    context.getTextConsumer().text(Text.literal(next).withColor(COL_ESC), curX, minOf(curX + w, maxX), y, y + 9)
+                    context.getTextConsumer().text(Text.literal(next).withColor(COL_ESC), curX, minOf(curX + w, maxX), y, y + fh)
                     curX += w; i += next.length
                 }
                 ch == '[' -> {
                     val j = text.indexOf(']', i + 1).let { if (it < 0) text.length else it + 1 }
                     val seg = text.substring(i, j)
                     val w = textRenderer.getWidth(seg)
-                    context.getTextConsumer().text(Text.literal(seg).withColor(COL_CLASS), curX, minOf(curX + w, maxX), y, y + 9)
+                    context.getTextConsumer().text(Text.literal(seg).withColor(COL_CLASS), curX, minOf(curX + w, maxX), y, y + fh)
                     curX += w; i = j
                 }
                 ch == '(' || ch == ')' -> {
                     val s = ch.toString()
                     val w = textRenderer.getWidth(s)
-                    context.getTextConsumer().text(Text.literal(s).withColor(COL_PAREN), curX, minOf(curX + w, maxX), y, y + 9)
+                    context.getTextConsumer().text(Text.literal(s).withColor(COL_PAREN), curX, minOf(curX + w, maxX), y, y + fh)
                     curX += w; i++
                 }
                 ch == '*' || ch == '+' || ch == '?' || ch == '{' || ch == '}' -> {
                     val s = ch.toString()
                     val w = textRenderer.getWidth(s)
-                    context.getTextConsumer().text(Text.literal(s).withColor(COL_QUANT), curX, minOf(curX + w, maxX), y, y + 9)
+                    context.getTextConsumer().text(Text.literal(s).withColor(COL_QUANT), curX, minOf(curX + w, maxX), y, y + fh)
                     curX += w; i++
                 }
                 ch == '|' -> {
                     val s = ch.toString()
                     val w = textRenderer.getWidth(s)
-                    context.getTextConsumer().text(Text.literal(s).withColor(COL_ALT), curX, minOf(curX + w, maxX), y, y + 9)
+                    context.getTextConsumer().text(Text.literal(s).withColor(COL_ALT), curX, minOf(curX + w, maxX), y, y + fh)
                     curX += w; i++
                 }
                 ch == '$' -> {
@@ -87,11 +88,11 @@ class AutoReplyEditScreen(
                         val seg = mr.value
                         val w = textRenderer.getWidth(seg)
                         val col = macroMap[seg] ?: COL_MACRO
-                        context.getTextConsumer().text(Text.literal(seg).withColor(col), curX, minOf(curX + w, maxX), y, y + 9)
+                        context.getTextConsumer().text(Text.literal(seg).withColor(col), curX, minOf(curX + w, maxX), y, y + fh)
                         curX += w; i += seg.length
                     } else {
                         val s = ch.toString(); val w = textRenderer.getWidth(s)
-                        context.getTextConsumer().text(Text.literal(s).withColor(COL_MACRO), curX, minOf(curX + w, maxX), y, y + 9)
+                        context.getTextConsumer().text(Text.literal(s).withColor(COL_MACRO), curX, minOf(curX + w, maxX), y, y + fh)
                         curX += w; i++
                     }
                 }
@@ -100,7 +101,7 @@ class AutoReplyEditScreen(
                     while (j < text.length && text[j] !in listOf('\\', '[', '(', ')', '*', '+', '?', '{', '}', '|', '$')) j++
                     val seg = text.substring(i, j)
                     val w = textRenderer.getWidth(seg)
-                    context.getTextConsumer().text(Text.literal(seg).withColor(COL_TEXT), curX, minOf(curX + w, maxX), y, y + 9)
+                    context.getTextConsumer().text(Text.literal(seg).withColor(COL_TEXT), curX, minOf(curX + w, maxX), y, y + fh)
                     curX += w; i = j
                 }
             }
@@ -126,11 +127,19 @@ class AutoReplyEditScreen(
     }
 
     private val panelW get() = (width  * 0.80).toInt()
-    // panelH is dynamic: starts at 80% of height and grows with number of reply options
-    private var panelHVar = (height * 0.80).toInt()
+    // panelH is FIXED at 80 % of screen height. The options section scrolls
+    // instead of the panel growing unboundedly and overflowing the screen.
+    private var panelHVar = 0
     private val panelH get() = panelHVar
     private val panelX get() = (width  - panelW) / 2
-    private val panelY get() = (height - panelH) / 2
+    private val panelY get() = maxOf(10, (height - panelH) / 2)
+
+    companion object {
+        /** Persists the visible-option scroll offset across screen recreations. */
+        var savedOptScroll = 0
+        /** System.identityHashCode of the rule that owns the offset (reset when rule changes). */
+        var savedOptRuleId = 0
+    }
 
     private lateinit var nameField: TextFieldWidget
     private lateinit var triggerField: TextFieldWidget
@@ -139,7 +148,6 @@ class AutoReplyEditScreen(
     private var triggerModeInfoY = 0
     private var preventInfoX = 0
     private var preventInfoY = 0
-    // Save button rectangle (used to draw a top overlay to avoid underlying fields showing through)
     private var saveBtnX = 0
     private var saveBtnY = 0
     private var saveBtnW = 0
@@ -149,26 +157,39 @@ class AutoReplyEditScreen(
     /** Y positions of each option row, used for drawing chance values in render(). */
     private val optionRowYs = mutableListOf<Int>()
 
+    /** First visible option index (= savedOptScroll, snapshotted in init). */
+    private var visStart = 0
+    /** How many option rows fit in the available area (computed in init). */
+    private var maxVisibleOptions = 4
+
     private lateinit var activeToggleBtn: CustomButtonWidget
-
-    // ── New feature fields ──────────────────────────────────────────────────
     private lateinit var cooldownField: TextFieldWidget
-    /** Nullable – only added to screen when rule.preventLoops == true */
     private var loopSecondsField: TextFieldWidget? = null
-
-    /** Prevent close() from calling saveFields() again. */
     private var suppressSaveOnClose = false
 
     // Label Y positions
-    private var labelNameY      = 0
-    private var labelTriggerY   = 0
-    private var labelChanY      = 0
-    private var labelCooldownY  = 0
-    private var labelPreventY   = 0
-    private var labelOptY       = 0
+    private var labelNameY     = 0
+    private var labelTriggerY  = 0
+    private var labelChanY     = 0
+    private var labelCooldownY = 0
+    private var labelPreventY  = 0
+    private var labelOptY      = 0
 
-    /** Sum of all weight fields. */
-    private fun currentWeightSum() = optionWeightFields.sumOf { it.text.toIntOrNull() ?: 0 }
+    /**
+     * Sum of ALL option weights (including those not currently visible).
+     * Live-reads visible fields so unsaved edits are reflected immediately.
+     */
+    private fun currentWeightSum(): Int {
+        var total = rule.options.sumOf { it.weight.coerceAtLeast(0) }
+        for (j in optionWeightFields.indices) {
+            val i = visStart + j
+            if (i < rule.options.size) {
+                val fieldW = optionWeightFields[j].text.toIntOrNull()?.coerceAtLeast(0) ?: 0
+                total = total - rule.options[i].weight.coerceAtLeast(0) + fieldW
+            }
+        }
+        return total
+    }
 
     // Column layout for option rows
     private val COL_DEL_W    = 36
@@ -186,10 +207,14 @@ class AutoReplyEditScreen(
     private val LOOP_SEC_FIELD_W = 60
 
     override fun init() {
-        // adjust panel height based on number of reply options so Save button moves
-        val base = (height * 0.80).toInt()
-        val extra = (rule.options.size.coerceAtLeast(0)) * 26
-        panelHVar = (base + extra).coerceAtMost(height - 40)
+        // Panel height is FIXED at 80 % of screen height. Option rows scroll
+        // within the available area instead of growing the panel unboundedly.
+        panelHVar = (height * 0.80).toInt()
+
+        // Reset scroll position when switching to a different rule.
+        val ruleId = System.identityHashCode(rule)
+        if (savedOptRuleId != ruleId) { savedOptScroll = 0; savedOptRuleId = ruleId }
+
         val px = panelX; val py = panelY; val pw = panelW; val ph = panelH
         val fieldX = px + 16
         var y = py + 46
@@ -330,12 +355,24 @@ class AutoReplyEditScreen(
         }
         y += 30
 
-        // ── Reply options ───────────────────────────────────────────────────
+        // ── Reply options  (virtual-scroll section) ─────────────────────────
         labelOptY = y - 9
+
+        // How many rows fit between the options label and the Save-button zone?
+        // saveBtnY = py + ph - 28.  Available height = saveBtnY - y - 32 (add-btn)
+        val optAreaH = (py + ph - 28) - y - 36
+        maxVisibleOptions = maxOf(1, optAreaH / 26)
+        val maxScroll = maxOf(0, rule.options.size - maxVisibleOptions)
+        if (savedOptScroll > maxScroll) savedOptScroll = maxScroll
+        visStart = savedOptScroll
+        val visEnd = minOf(visStart + maxVisibleOptions, rule.options.size)
+
         optionTextFields.clear()
         optionWeightFields.clear()
         optionRowYs.clear()
-        for ((i, option) in rule.options.withIndex()) {
+
+        for (i in visStart until visEnd) {
+            val option = rule.options[i]
             val rowY = y
             optionRowYs.add(rowY)
 
@@ -356,7 +393,7 @@ class AutoReplyEditScreen(
             addDrawableChild(wf)
             optionWeightFields.add(wf)
 
-            val idx = i
+            val idx = i   // actual option index (not local loop index)
             addDrawableChild(CustomButtonWidget.delete(xDel, rowY, COL_DEL_W, 20, "✕") {
                 saveFields(); rule.options.removeAt(idx); ModConfig.save()
                 suppressSaveOnClose = true
@@ -395,24 +432,27 @@ class AutoReplyEditScreen(
             rule.preventLoopSeconds = f.text.toIntOrNull()?.coerceIn(1, 9999)
                 ?: rule.preventLoopSeconds
         }
-        // Validation: when Exact mode is enabled, replies using "/say " are unsafe
-        // because ChatChannel detection is not applied to raw lines in Exact mode.
-        // Prevent saving if any reply option starts with /say when rule.triggerExact == true.
+
+        // ── Validation: /say not allowed in Exact Match mode ────────────────
+        // Check ALL parsed sequence parts so that `"/say hello";20;"text"` is
+        // also caught, not just a bare /say at the start of the raw field text.
         if (rule.triggerExact) {
             for (tf in optionTextFields) {
-                val s = tf.text.trim().removeSurrounding("\"")
-                if (s.startsWith("/say ", ignoreCase = true)) {
-                    // show user a red message in chat HUD and abort save
-                    client?.inGameHud?.chatHud?.addMessage(
-                        Text.literal("Cannot use /say replies while Exact match is enabled. Disable Exact or remove /say from replies.").withColor(0xFF5555)
-                    )
-                    return false
+                val cmds = parseReplyCommands(tf.text)
+                for (cmd in cmds) {
+                    if (cmd.startsWith("/say ", ignoreCase = true)) {
+                        val err = Text.literal(
+                            "⚠ Cannot use /say with Exact Match enabled." +
+                            " Use /gc, /pc or plain text instead."
+                        ).withColor(0xFF5555)
+                        client?.inGameHud?.chatHud?.addMessage(err)
+                        return false
+                    }
                 }
             }
         }
 
-        // Validation: when in Advanced trigger mode, every macro used in replies (except $ign)
-        // must also be present in the trigger/template. Abort save and show error if not.
+        // ── Validation: Advanced macro consistency ───────────────────────────
         if (rule.triggerAdvanced) {
             val MACRO_RE = Regex("\\$([A-Za-z0-9_]+)")
             val triggerMacros = mutableSetOf<String>()
@@ -426,7 +466,7 @@ class AutoReplyEditScreen(
                     if (name.lowercase() == "ign") continue
                     if (!triggerMacros.contains(name)) {
                         client?.inGameHud?.chatHud?.addMessage(
-                            Text.literal("Reply uses macro \$$name which is not present in the trigger template. Add it to the template or remove it from the reply.").withColor(0xFF5555)
+                            Text.literal("Reply uses macro \$$name which is not present in the trigger template.").withColor(0xFF5555)
                         )
                         return false
                     }
@@ -435,14 +475,77 @@ class AutoReplyEditScreen(
         }
 
         for (i in rule.options.indices) {
-            if (i < optionTextFields.size)   rule.options[i].text   = optionTextFields[i].text
-            if (i < optionWeightFields.size) rule.options[i].weight =
-                optionWeightFields[i].text.toLongOrNull()
+            // Map visible-field index back to the actual option index via visStart offset.
+            val j = i - visStart
+            if (j in optionTextFields.indices)   rule.options[i].text   = optionTextFields[j].text
+            if (j in optionWeightFields.indices) rule.options[i].weight =
+                optionWeightFields[j].text.toLongOrNull()
                     ?.coerceIn(0L, Int.MAX_VALUE.toLong())
                     ?.toInt()
                     ?: rule.options[i].weight.coerceAtLeast(0)
         }
         return true
+    }
+
+    /**
+     * Extracts all command/text parts from a reply field value, respecting the
+     * sequence format `"cmd";delay;"cmd";...`  Returns only the text tokens,
+     * skipping numeric delay values.  Used by validation to check each part.
+     */
+    private fun parseReplyCommands(raw: String): List<String> {
+        if (!raw.contains(';')) {
+            val cmd = raw.trim().removeSurrounding("\"")
+            return if (cmd.isNotEmpty()) listOf(cmd) else emptyList()
+        }
+        val result = mutableListOf<String>()
+        for (part in raw.split(";")) {
+            val trimmed = part.trim().removeSurrounding("\"")
+            if (trimmed.isNotEmpty() && trimmed.toLongOrNull() == null) {
+                result.add(trimmed)
+            }
+        }
+        return result
+    }
+
+    /**
+     * Returns a list of (colour, warningText) pairs for a reply option field value.
+     * These are rendered as inline hints below the field in the edit screen.
+     */
+    private fun replyOptionIssues(text: String): List<Pair<Int, String>> {
+        if (text.isBlank()) return emptyList()
+        val issues = mutableListOf<Pair<Int, String>>()
+        val isSequence = text.contains(';')
+        val cmds = parseReplyCommands(text)
+
+        // ── /say in Exact Match mode ──────────────────────────────────────────
+        if (rule.triggerExact) {
+            for (cmd in cmds) {
+                if (cmd.startsWith("/say ", ignoreCase = true)) {
+                    issues.add(0xFF4444 to "⚠ /say not allowed with Exact Match — use /gc, /pc or plain text")
+                    break
+                }
+            }
+        }
+
+        // ── Sequence format hints ─────────────────────────────────────────────
+        if (isSequence) {
+            // Hint: command parts inside a sequence should be wrapped in ""
+            for (part in text.split(";")) {
+                val t = part.trim()
+                // A non-empty, non-numeric part that starts with / but has no quotes
+                if (t.isNotEmpty() && t.toLongOrNull() == null && t.startsWith("/") && !t.startsWith("\"")) {
+                    issues.add(0xFFAA00 to "⚠ Wrap commands in quotes inside sequences: \"/cmd\";delay;")
+                    break
+                }
+            }
+        }
+
+        // ── Hint: command replies benefit from "cmd"; format ─────────────────
+        if (!isSequence && text.trimStart().startsWith("/") && !text.trimStart().startsWith("\"")) {
+            issues.add(0x7799BB to "→ Tip: use \"/cmd\"; format for commands (trailing ; makes it a sequence)")
+        }
+
+        return issues
     }
 
     /**
@@ -456,7 +559,7 @@ class AutoReplyEditScreen(
         val COL_STR = 0x00AAAA   // §3 dark aqua
         val COL_SEP = 0x5555FF   // §9 blue
         val COL_NUM = 0xFF5555   // §c light red
-        val y2 = y + 9
+        val y2 = y + textRenderer.fontHeight
 
         // Determine macro colours from the trigger template (so reply macros copy regex colours)
         val macroMap = if (rule.triggerAdvanced) buildMacroColorMapFromTemplate(rule.triggerRegex) else null
@@ -577,19 +680,52 @@ class AutoReplyEditScreen(
             )
         }
 
-        // ── Reply Options Label + Chance-Header ─────────────────────────────
+        // ── Reply Options Label + Chance-Header + scroll indicator ──────────
         val total = currentWeightSum()
         if (rule.options.isNotEmpty()) {
-            val optLabel = "Reply Options  ·  Weight  [total: $total]"
+            val visEnd2   = minOf(visStart + maxVisibleOptions, rule.options.size)
+            val scrollHint = if (rule.options.size > maxVisibleOptions)
+                "  [${visStart + 1}–$visEnd2 of ${rule.options.size}  ▲▼ scroll]" else ""
+            val optLabel = "Reply Options  ·  Weight  [total: $total]$scrollHint"
             GuiHelper.drawTextLeft(context, textRenderer, optLabel, panelX + 16, labelOptY, lc)
             GuiHelper.drawTextLeft(context, textRenderer, "Chance", xChance, labelOptY, lc)
+        }
+
+        // ── Advanced: warn about unclosed macro quotes ───────────────────────
+        // An unclosed `"$macro …` captures ALL remaining text. Any text written
+        // after the macro name (which the user might intend as a separate literal)
+        // becomes the stop-word, not a separate token.
+        if (rule.triggerAdvanced) {
+            val tpl = triggerField.text
+            var inQ = false; var qContent = ""
+            for (ch in tpl) {
+                if (ch == '"') { if (!inQ) { inQ = true; qContent = "" } else inQ = false }
+                else if (inQ) qContent += ch
+            }
+            if (inQ && qContent.trimStart().startsWith("$")) {
+                val parts = qContent.trim().split(Regex("\\s+"), 2)
+                val macroName = parts[0]
+                val stopWord  = parts.getOrNull(1)
+                val warnX = triggerField.x + 4
+                val warnY = triggerField.y + triggerField.height + 6
+                val warnMsg = if (stopWord != null)
+                    "⚠ $macroName has no closing \" — captures until \"$stopWord\" (stop-word). Add \" to close."
+                else
+                    "⚠ $macroName has no closing \" — captures ALL remaining text. No further tokens checked."
+                context.getTextConsumer().text(
+                    Text.literal(warnMsg).withColor(0xFFAA00),
+                    warnX, warnX + triggerField.width - 8, warnY, warnY + textRenderer.fontHeight
+                )
+            }
         }
         // If advanced mode and any reply option uses macros not defined in the trigger,
         // show a top-level warning similar to the $ign note.
         if (rule.triggerAdvanced) {
             val MACRO_RE = Regex("\\$([A-Za-z0-9_]+)")
             val triggerMacros = mutableSetOf<String>()
-            for (m in MACRO_RE.findAll(rule.triggerRegex)) triggerMacros.add(m.groupValues[1])
+            // Use the live field text so the warning reflects what the user has typed,
+            // not the last-saved value (which would cause false "undefined" errors).
+            for (m in MACRO_RE.findAll(triggerField.text)) triggerMacros.add(m.groupValues[1])
             val undefinedAll = mutableSetOf<String>()
             for (tf in optionTextFields) {
                 for (m in MACRO_RE.findAll(tf.text)) {
@@ -609,32 +745,32 @@ class AutoReplyEditScreen(
         val infoStrW = textRenderer.getWidth(infoStr)
         val infoX    = panelX + panelW - infoStrW - 8
         val infoY    = panelY + 11
-        val hovInfo  = mouseX in infoX..(infoX + infoStrW) && mouseY in infoY..(infoY + 9)
+        val hovInfo  = mouseX in infoX..(infoX + infoStrW) && mouseY in infoY..(infoY + textRenderer.fontHeight)
         context.getTextConsumer().text(
             Text.literal(infoStr).withColor(if (hovInfo) 0xFFFF88 else 0x7799BB),
-            infoX, infoX + infoStrW, infoY, infoY + 9
+            infoX, infoX + infoStrW, infoY, infoY + textRenderer.fontHeight
         )
 
         // ── Trigger mode [?] icon (next to the Simple/Advanced toggle)
         val infoStr2 = "[?]"
         val infoStr2W = textRenderer.getWidth(infoStr2)
-        val hovInfo2 = mouseX in triggerModeInfoX..(triggerModeInfoX + infoStr2W) && mouseY in triggerModeInfoY..(triggerModeInfoY + 9)
+        val hovInfo2 = mouseX in triggerModeInfoX..(triggerModeInfoX + infoStr2W) && mouseY in triggerModeInfoY..(triggerModeInfoY + textRenderer.fontHeight)
         // Draw the trigger-mode help icon only when Advanced mode is enabled.
         if (rule.triggerAdvanced) {
             context.getTextConsumer().text(
                 Text.literal(infoStr2).withColor(if (hovInfo2) 0xFFFF88 else 0x7799BB),
-                triggerModeInfoX, triggerModeInfoX + infoStr2W, triggerModeInfoY, triggerModeInfoY + 9
+                triggerModeInfoX, triggerModeInfoX + infoStr2W, triggerModeInfoY, triggerModeInfoY + textRenderer.fontHeight
             )
         }
 
         // ── Prevent Loops [?] icon (only shown when Prevent Loops is enabled)
         val infoStr3 = "[?]"
         val infoStr3W = textRenderer.getWidth(infoStr3)
-        val hovPrevent = mouseX in preventInfoX..(preventInfoX + infoStr3W) && mouseY in preventInfoY..(preventInfoY + 9)
+        val hovPrevent = mouseX in preventInfoX..(preventInfoX + infoStr3W) && mouseY in preventInfoY..(preventInfoY + textRenderer.fontHeight)
         if (rule.preventLoops) {
             context.getTextConsumer().text(
                 Text.literal(infoStr3).withColor(if (hovPrevent) 0xFFFF88 else 0x7799BB),
-                preventInfoX, preventInfoX + infoStr3W, preventInfoY, preventInfoY + 9
+                preventInfoX, preventInfoX + infoStr3W, preventInfoY, preventInfoY + textRenderer.fontHeight
             )
         }
 
@@ -740,7 +876,8 @@ class AutoReplyEditScreen(
                 if (rule.triggerAdvanced && tf != null) {
                     val MACRO_RE = Regex("\\$([A-Za-z0-9_]+)")
                     val triggerMacros = mutableSetOf<String>()
-                    for (m in MACRO_RE.findAll(rule.triggerRegex)) triggerMacros.add(m.groupValues[1])
+                    // Live text so inline error disappears as soon as the user types the macro
+                    for (m in MACRO_RE.findAll(triggerField.text)) triggerMacros.add(m.groupValues[1])
                     for (m in MACRO_RE.findAll(tf.text)) {
                         val name = m.groupValues[1]
                         if (name.lowercase() == "ign") continue
@@ -758,10 +895,26 @@ class AutoReplyEditScreen(
                         !tf.isFocused && (t.startsWith("/") || t.contains(";") || t.contains("$")) ->
                             drawSyntaxHighlight(context, t, tf.x + 4, tf.y + 6, tf.x + tf.width - 4)
                     }
-                    // Draw inline warning under option if undefined macros exist
+
+                    // ── Inline issues: undefined macros + format warnings ──────
+                    // Collect ALL issues for this option field and stack them below
+                    // the field, one per line.
+                    val allIssues = mutableListOf<Pair<Int, String>>()
+                    // 1. Undefined macros (Advanced mode)
                     if (undefinedMacros.isNotEmpty()) {
-                        val warn = "Undefined macros: " + undefinedMacros.joinToString(",") { "\$$it" }
-                        context.getTextConsumer().text(Text.literal(warn).withColor(0xFF5555), tf.x + 4, tf.x + tf.width - 4, tf.y + 22, tf.y + 31)
+                        allIssues.add(0xFF5555 to "Undefined macros: " + undefinedMacros.joinToString(",") { "\$$it" })
+                    }
+                    // 2. Format / semantic issues from replyOptionIssues()
+                    allIssues.addAll(replyOptionIssues(t))
+
+                    val fh = textRenderer.fontHeight
+                    for ((idx2, issue) in allIssues.withIndex()) {
+                        val (col, msg) = issue
+                        val warnY = tf.y + 22 + idx2 * (fh + 2)
+                        context.getTextConsumer().text(
+                            Text.literal(msg).withColor(col),
+                            tf.x + 4, tf.x + tf.width - 4, warnY, warnY + fh
+                        )
                     }
                 }
 
@@ -806,26 +959,44 @@ class AutoReplyEditScreen(
         // ── Tooltip for trigger mode [?] (only when Advanced mode selected) ──
         if (hovInfo2 && rule.triggerAdvanced) {
             val tip2 = listOf(
-                Text.literal("§eAdvanced Trigger Mode§r  §8(Templates & macros)"),
+                Text.literal("§eAdvanced Trigger Mode  §8— Templates & macros"),
                 Text.literal(""),
-                Text.literal("§7Quick: Put named macros like §f\$player §7into quoted parts to capture values."),
-                Text.literal("§7Example trigger: §f\"\$player\" joined \"\$type\"§7 → captures player and type."),
+                Text.literal("§7Quoted parts §f\"…\"§7 capture text into macros:"),
+                Text.literal("§8  §f\"\$ign\"        §8→ captures one word into \$ign"),
+                Text.literal("§8  §f\"\$ign stop\"   §8→ captures everything up to the stop-word"),
+                Text.literal("§8  §f\"\$ign         §8→ no closing \" — captures ALL remaining text"),
+                Text.literal("§7Example: §fGuild > \"\$player\" joined."),
+                Text.literal("§8  matches: Guild > swolleneyeball joined.  (\$player=swolleneyeball)"),
                 Text.literal(""),
-                Text.literal("§7How to write replies:"),
-                Text.literal("§8• Use captured macros in replies: §f\$player §f\$type"),
-                Text.literal("§8• The editor colors each macro so you can match them visually."),
+                Text.literal("§eOR-groups §8(v1,v2,…)  §7— pick one variant:"),
+                Text.literal("§8  §f(Guild >,Party >) \"\$ign\": \"\$msg"),
+                Text.literal("§8  matches: Guild > Player: msg  OR  Party > Player: msg"),
                 Text.literal(""),
-                Text.literal("§eOR / alternation§r:"),
-                Text.literal("§7Use parentheses with commas to match alternatives: §f(Guild >,Party >)"),
-                Text.literal("§7Example: §f(Guild >,Party >) \$player joined §7matches either channel."),
+                Text.literal("§eFilter groups §8— special keywords before the semicolon:"),
                 Text.literal(""),
-                Text.literal("§eExact mode§r:"),
-                Text.literal("§7• Regex: Exact = entire message must match."),
-                Text.literal("§7• Template: Exact = literals must be at the exact positions (no searching)."),
+                Text.literal("§a(pass;v1,v2,…) §8— optional match. Text BEFORE ( is REQUIRED."),
+                Text.literal("§8  If a variant is found: consume it and continue."),
+                Text.literal("§8  If no variant found: skip it silently and continue."),
+                Text.literal("§8  Example:  §fGuild > (pass;[MVP+],[VIP+]) \"\$ign\" \"\$msg"),
+                Text.literal("§8  Ranked:   §aGuild > [MVP+] Player: woof  §8→ \$ign=Player ✓"),
+                Text.literal("§8  Unranked: §aGuild > Player: woof          §8→ \$ign=Player ✓"),
+                Text.literal("§8  §c'Guild > ' is mandatory§8; the §c[MVP+]§8 inside is optional."),
+                Text.literal(""),
+                Text.literal("§e(store\$macro;v1,v2,…) §8— like pass, but stores what was matched."),
+                Text.literal("§8  Variant found:  §estores matched text in \$macro§8."),
+                Text.literal("§8  Nothing found:  §estores empty string §f\"\"§8 in \$macro§8."),
+                Text.literal("§8  Example:  §fGuild > (store\$rank;[MVP+],[VIP+]) \"\$ign\" \"\$msg"),
+                Text.literal("§8  Ranked:   §erank=\"[MVP+]\"§8, ign=Player, msg=woof"),
+                Text.literal("§8  Unranked: §erank=\"\"§8,       ign=Player, msg=woof"),
+                Text.literal("§8  Use §f\$rank§8 in the reply to show or react to the player's rank."),
+                Text.literal(""),
+                Text.literal("§c(break;v1,v2,…) §8— FAILS the whole match if a variant is found."),
+                Text.literal("§8  Example:  §f(break;bot1,bot2) \"\$ign\": \"\$msg"),
+                Text.literal("§8  If message starts with 'bot1 …' or 'bot2 …' → rule skipped."),
                 Text.literal(""),
                 Text.literal("§7Notes:"),
-                Text.literal("§8• \$ign is special: if captured in the template it overrides the sender's name."),
-                Text.literal("§8• Replies may only use macros present in the template (except \$ign).")
+                Text.literal("§8• §f\$ign§8 overrides detected sender name when captured in the template."),
+                Text.literal("§8• Replies may only use macros defined in the trigger (except §f\$ign§8).")
             )
             context.drawTooltip(textRenderer, tip2, mouseX, mouseY)
         }
@@ -855,6 +1026,27 @@ class AutoReplyEditScreen(
         } else {
             GuiHelper.drawFade(context, width, height, a)
         }
+    }
+
+    /**
+     * Scrolls the options section when the pointer is inside the panel.
+     * Triggers a screen rebuild to reposition the TextFieldWidgets.
+     */
+    override fun mouseScrolled(mouseX: Double, mouseY: Double,
+                                horizontal: Double, vertical: Double): Boolean {
+        val maxScroll = maxOf(0, rule.options.size - maxVisibleOptions)
+        if (maxScroll <= 0) return super.mouseScrolled(mouseX, mouseY, horizontal, vertical)
+        if (mouseX < panelX || mouseX > panelX + panelW) return super.mouseScrolled(mouseX, mouseY, horizontal, vertical)
+        if (mouseY < labelOptY || mouseY > saveBtnY.toDouble()) return super.mouseScrolled(mouseX, mouseY, horizontal, vertical)
+        val step = if (vertical > 0) -1 else if (vertical < 0) 1 else 0
+        if (step == 0) return false
+        val newScroll = (savedOptScroll + step).coerceIn(0, maxScroll)
+        if (newScroll == savedOptScroll) return true
+        savedOptScroll = newScroll
+        saveFields()
+        suppressSaveOnClose = true
+        client?.setScreen(AutoReplyEditScreen(parent, rule))
+        return true
     }
 
     override fun shouldPause() = false

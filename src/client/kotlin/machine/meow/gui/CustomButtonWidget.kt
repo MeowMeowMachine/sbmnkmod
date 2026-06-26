@@ -49,10 +49,16 @@ class CustomButtonWidget(
         context.fill(bx,          by,          bx + 1,  by + bh, bc)
         context.fill(bx + bw - 1, by,          bx + bw, by + bh, bc)
 
-        // MC 1.21.11: text must go through DrawnTextConsumer
+        // MC 1.21.11: text must go through DrawnTextConsumer. Compute vertical
+        // centering using the current font height so labels render correctly
+        // regardless of font metrics.
         val styledMsg = if (active) message else message.copy().formatted(Formatting.DARK_GRAY)
         val consumer  = context.getTextConsumer()
-        drawTextWithMargin(consumer, styledMsg, 4)
+        val tr = net.minecraft.client.MinecraftClient.getInstance()?.textRenderer
+        val fh = tr?.fontHeight ?: 9
+        val textY = by + (bh - fh) / 2
+        // left/right padding of 4px
+        consumer.text(styledMsg, bx + 4, bx + bw - 4, textY, textY + fh)
     }
 
     override fun appendClickableNarrations(builder: NarrationMessageBuilder) =

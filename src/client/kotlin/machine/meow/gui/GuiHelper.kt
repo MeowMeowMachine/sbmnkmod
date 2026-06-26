@@ -34,7 +34,8 @@ object GuiHelper {
      */
     fun drawTextLeft(context: DrawContext, tr: TextRenderer, text: Text, x: Int, y: Int) {
         val w = tr.getWidth(text)
-        context.getTextConsumer().text(text, x, x + w, y, y + 9)
+        val fh = tr.fontHeight
+        context.getTextConsumer().text(text, x, x + w, y, y + fh)
     }
 
     /** Convenience overload with a raw string + RGB colour. */
@@ -45,7 +46,12 @@ object GuiHelper {
      * Draws text CENTRED within the horizontal range [x1, x2] at vertical position y.
      */
     fun drawTextCentered(context: DrawContext, text: Text, x1: Int, x2: Int, y: Int) {
-        context.getTextConsumer().text(text, x1, x2, y, y + 9)
+        // NOTE: no TextRenderer available here — consumer expects the vertical
+        // bounds. 9 was a hardcoded fallback; use a best-effort measurement by
+        // querying Minecraft's textRenderer when possible.
+        val tr = net.minecraft.client.MinecraftClient.getInstance()?.textRenderer
+        val fh = tr?.fontHeight ?: 9
+        context.getTextConsumer().text(text, x1, x2, y, y + fh)
     }
 
     // ── Panel ─────────────────────────────────────────────────────────────────
